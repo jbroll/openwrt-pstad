@@ -44,7 +44,7 @@ relayd must not run alongside it.
 - [docs/backlog.md](docs/backlog.md): what is missing before `*` in the
   allowlist is safe on a busy repeater.
 
-The companion repo `wr1800k-openwrt` (same author) builds and flashes a
+The companion repo [wr1800k-openwrt](https://github.com/jbroll/wr1800k-openwrt) builds and flashes a
 credentialed OpenWrt image for the Fenvi WR1800K with this daemon baked in as
 its `proxy` backhaul mode.
 
