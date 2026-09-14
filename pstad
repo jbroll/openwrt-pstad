@@ -13,6 +13,7 @@ ASSOC=${PSTA_ASSOC:-20}
 DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
 HOLDOFF=${PSTA_HOLDOFF:-60}
 PROC=${PROC:-/proc}
+KILL_WAIT=3
 
 log() { logger -t pstad "$*"; }
 
@@ -106,6 +107,22 @@ psta_supplicants() {
 kill_supplicants() {  # IFACE
 	psta_supplicants | while read -r spid siface; do
 		[ "$siface" = "$1" ] && kill "$spid" 2>/dev/null
+	done
+	return 0
+}
+
+# kill only signals: a supplicant still shutting down would take the interface
+# setup creates next, leaving two supplicants on one station.
+clear_station() {  # IFACE
+	kill_supplicants "$1"
+	waited=0
+	while psta_supplicants | grep -q " $1\$"; do
+		if [ "$waited" -ge "$KILL_WAIT" ]; then
+			log "supplicant on $1 did not exit in ${KILL_WAIT}s"
+			return 1
+		fi
+		sleep 1
+		waited=$(( waited + 1 ))
 	done
 	return 0
 }
@@ -215,7 +232,7 @@ setup() {  # MAC PORT
 	mkdir -p "$d"
 	echo "$iface" > "$d/iface"; echo "$port" > "$d/port"; echo "$pref" > "$d/pref"
 	echo 0 > "$d/count"; date +%s > "$d/seen"
-	kill_supplicants "$iface"
+	clear_station "$iface" &&
 	# EAPOL must reach hostapd and the supplicant, never the redirect.
 	iw phy "$(phy_of "$(backhaul)")" interface add "$iface" type managed addr "$mac" &&
 	ip link set "$iface" up &&
@@ -341,9 +358,21 @@ sweep() {
 		return
 	fi
 	now=$(date +%s)
+	sups=$(psta_supplicants)
 	for d in "$RUN"/*/; do
 		[ -s "$d/port" ] && [ -s "$d/pref" ] && [ -s "$d/count" ] && [ -s "$d/seen" ] || continue
 		read -r port < "$d/port"; read -r pref < "$d/pref"
+		# Two supplicants on one station fight over it; teardown kills both and
+		# the fdb pass below rebuilds the client with one.
+		if [ -s "$d/iface" ]; then
+			read -r iface < "$d/iface"
+			n=$(printf '%s\n' "$sups" | grep -c " $iface\$")
+			if [ "$n" -gt 1 ]; then
+				log "$iface has $n supplicants"
+				teardown "$(basename "$d")"
+				continue
+			fi
+		fi
 		# A station that dropped off the backhaul still attracts the client's
 		# frames through the redirect, so the counter cannot reveal it.
 		if [ -s "$d/iface" ]; then

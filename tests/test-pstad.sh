@@ -352,14 +352,47 @@ kill() { echo "kill $*"; }
 # setup kills a supplicant already on its station name before creating the interface
 RUN=$(mktemp -d); CONF=$RUN/wpa.conf
 echo 02:00:00:00:00:20 > "$RUN/bssid"
-psta_supplicants() { printf '555 psta-00beef\n777 psta-00cafe\n'; }
+: > "$RUN/alive"
+psta_supplicants() { [ -f "$RUN/alive" ] && echo '555 psta-00beef'; echo '777 psta-00cafe'; }
+kill() { echo "kill $*"; [ "$1" = 555 ] && rm -f "$RUN/alive"; }
 out=$(setup "$mac" lan1)
 kill_line=$(echo "$out" | grep -nx "kill 555" | cut -d: -f1)
 add_line=$(echo "$out" | grep -n "interface add psta-00beef" | cut -d: -f1)
 [ -n "$kill_line" ] && [ -n "$add_line" ] && [ "$kill_line" -lt "$add_line" ]
 check "setup kills a leftover supplicant before adding the interface" 0 $?
 check "setup spares other stations' supplicants" 0 "$(echo "$out" | grep -cx "kill 777")"
+check "setup does not wait for a leftover already gone" 0 "$(echo "$out" | grep -c '^sleep ')"
 rm -rf "$RUN"
+
+# setup waits for a killed leftover to exit before creating the interface
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+: > "$RUN/alive"
+psta_supplicants() { [ -f "$RUN/alive" ] && echo '555 psta-00beef'; }
+kill() { echo "kill $*"; }
+sleep() { echo "sleep $*"; rm -f "$RUN/alive"; }
+out=$(setup "$mac" lan1)
+sleep_line=$(echo "$out" | grep -n '^sleep ' | head -1 | cut -d: -f1)
+add_line=$(echo "$out" | grep -n "interface add psta-00beef" | cut -d: -f1)
+[ -n "$sleep_line" ] && [ -n "$add_line" ] && [ "$sleep_line" -lt "$add_line" ]
+check "setup waits for a leftover to exit before adding the interface" 0 $?
+rm -rf "$RUN"
+
+# setup gives up, after a bounded wait, on a leftover that never exits
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+psta_supplicants() { echo '555 psta-00beef'; }
+sleep() { echo "sleep $*"; }
+teardown() { echo "teardown $1"; rm -rf "$RUN/$1"; }
+out=$(setup "$mac" lan1)
+check "setup never adds the interface beside a live leftover" 0 "$(echo "$out" | grep -c 'interface add')"
+check "setup waits a bounded time for a leftover" 3 "$(echo "$out" | grep -c '^sleep ')"
+check "setup tears down after giving up" 1 "$(echo "$out" | grep -cx "teardown $mac")"
+rm -rf "$RUN"
+unset -f teardown
+sleep() { :; }
+kill() { echo "kill $*"; }
+psta_supplicants() { :; }
 
 # setup gives the supplicant no pid file: an exiting supplicant deletes its pid
 # file, which is the new one's when both were given the same path
@@ -485,6 +518,33 @@ check "sweep kills an unclaimed supplicant" "kill 777
 log killed orphan wpa_supplicant 777 on psta-00dead" "$(sweep)"
 rm -rf "$RUN"
 unset -f backhaul iw bridge elect log psta_supplicants
+PSTAD_LIB=1 . ./pstad
+
+# sweep tears down a client whose station has more than one supplicant, and
+# keeps one with exactly one
+RUN=$(mktemp -d); d=$RUN/$mac
+mkdir -p "$d"
+echo lan1 > "$d/port"; echo 100 > "$d/pref"; echo 0 > "$d/count"; date +%s > "$d/seen"
+echo psta-00beef > "$d/iface"
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+backhaul() { echo phy1-sta0; }
+iw() { printf 'Connected to 02:00:00:00:00:20 (on phy1-sta0)\n\tfreq: 5660.0\n'; }
+tc() { case "$1" in -s) cat tests/tc-stats.txt;; esac; }
+bridge() { :; }
+elect() { :; }
+log() { echo "log $*"; }
+kill() { echo "kill $*"; }
+teardown() { echo "teardown $1"; rm -rf "$RUN/$1"; }
+psta_supplicants() { [ -d "$d" ] && printf '555 psta-00beef\n556 psta-00beef\n'; }
+check "sweep tears down a station with two supplicants" "log psta-00beef has 2 supplicants
+teardown $mac" "$(sweep)"
+mkdir -p "$d"
+echo lan1 > "$d/port"; echo 100 > "$d/pref"; echo 0 > "$d/count"; date +%s > "$d/seen"
+echo psta-00beef > "$d/iface"
+psta_supplicants() { echo '555 psta-00beef'; }
+check "sweep keeps a station with one supplicant" "" "$(sweep)"
+rm -rf "$RUN"
+unset -f backhaul iw tc bridge elect log kill teardown psta_supplicants
 PSTAD_LIB=1 . ./pstad
 
 # locked() must release its lock fd itself, and must not leak it to a

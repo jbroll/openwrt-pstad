@@ -26,6 +26,8 @@ The timer loop. Every `PSTA_SWEEP` seconds it:
 - compares the backhaul's current BSSID with the one the supplicant config was
   written for. If they differ, every station is torn down and the config
   rewritten, since each station is pinned to that BSSID and frequency.
+- for each client, tears it down if more than one `wpa_supplicant` runs on its
+  station, logging `<iface> has <n> supplicants`.
 - for each client, checks the station is still associated. A station reading
   "Not connected" gets a `down` marker; after `PSTA_DOWN_GRACE` seconds of
   that, the client is torn down. A station seen connected again clears the
