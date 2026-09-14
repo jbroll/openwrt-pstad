@@ -2,6 +2,7 @@
 # Run from anywhere: sh tests/test-pstad.sh
 cd "$(dirname "$0")/.." || exit 1
 PSTAD_LIB=1 . ./pstad
+PROC=$(mktemp -d)
 fail=0
 check() {  # name expected actual
 	if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected [$2] got [$3]"; fail=1; fi
@@ -69,6 +70,16 @@ held "$mac"; check "held expires" 1 $?
 [ -f "$RUN/holdoff/$mac" ]; check "held removes expired marker" 1 $?
 held "$mac2"; check "held unknown mac" 1 $?
 rm -rf "$RUN"
+
+# psta_supplicants: only wpa_supplicant processes on a psta-* station
+mkdir -p "$PROC/123" "$PROC/124" "$PROC/125" "$PROC/126" "$PROC/127"
+printf 'wpa_supplicant\0-B\0-D\0nl80211\0-i\0psta-00beef\0-c\0/var/run/psta/wpa.conf\0' > "$PROC/123/cmdline"
+printf '/usr/sbin/wpa_supplicant\0-n\0-s\0-g\0/var/run/wpa_supplicant/global\0' > "$PROC/124/cmdline"
+printf 'ash\0-c\0ps w | grep wpa_supplicant -i psta-00beef\0' > "$PROC/125/cmdline"
+: > "$PROC/126/cmdline"
+printf 'wpa_supplicant\0-i\0phy1-sta0\0' > "$PROC/127/cmdline"
+check "psta supplicants" "123 psta-00beef" "$(psta_supplicants)"
+rm -rf "${PROC:?}"/*
 
 # Lifecycle logic with the device-touching functions replaced.
 RUN=$(mktemp -d); ALLOW=$RUN/allow; CONF=$RUN/wpa.conf; printf '%s\n' "$mac" > "$ALLOW"
@@ -153,6 +164,24 @@ check "teardown empty dir touches no device" "" "$(teardown "$mac")"
 [ -d "$RUN/$mac" ]; check "teardown empty dir removes it" 1 $?
 rm -rf "$RUN"
 
+# teardown kills every supplicant on the client's station before deleting it,
+# including one its pid file does not name
+RUN=$(mktemp -d)
+mkdir -p "$RUN/$mac"; echo psta-00beef > "$RUN/$mac/iface"; echo 111 > "$RUN/$mac/pid"
+backhaul() { echo phy1-sta0; }
+log() { :; }
+psta_supplicants() { printf '111 psta-00beef\n555 psta-00beef\n777 psta-00cafe\n'; }
+out=$(teardown "$mac")
+check "teardown kills an untracked supplicant" 1 "$(echo "$out" | grep -cx "kill 555")"
+check "teardown spares other stations' supplicants" 0 "$(echo "$out" | grep -cx "kill 777")"
+kill_line=$(echo "$out" | grep -nx "kill 555" | cut -d: -f1)
+del_line=$(echo "$out" | grep -nx "iw dev psta-00beef del" | cut -d: -f1)
+[ -n "$kill_line" ] && [ -n "$del_line" ] && [ "$kill_line" -lt "$del_line" ]
+check "teardown kills before deleting the interface" 0 $?
+rm -rf "$RUN"
+unset -f backhaul log
+psta_supplicants() { :; }
+
 # teardown_all: one tc qdisc del per port that appeared, wpa.conf gone, returns 0
 RUN=$(mktemp -d); CONF=$RUN/wpa.conf
 mkdir -p "$RUN/mac1" "$RUN/mac2"
@@ -185,6 +214,18 @@ unset -f backhaul
 [ -f "$RUN/forwarder" ]; check "teardown_all clears forwarder" 1 $?
 teardown_all; check "teardown_all returns 0 with no clients" 0 $?
 rm -rf "$RUN"
+
+# teardown_all also kills supplicants no client dir accounts for
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+iw() { :; }
+tc() { :; }
+log() { :; }
+kill() { echo "kill $*"; }
+psta_supplicants() { echo '777 psta-00dead'; }
+check "teardown_all kills unclaimed supplicants" "kill 777" "$(teardown_all)"
+rm -rf "$RUN"
+unset -f iw tc log
+psta_supplicants() { :; }
 
 # elect: keeps a connected forwarder, moves the rule off a disconnected one,
 # skips disconnected candidates, and does nothing with no candidates
@@ -296,6 +337,53 @@ check "setup second client adds no group rule" 1 $?
 rm -rf "$RUN"
 unset -f backhaul backhaul_mac phy_of ip wpa_supplicant iw sleep log teardown
 
+# setup: shared stubs for the next two blocks
+backhaul() { echo phy1-sta0; }
+backhaul_mac() { echo 02:00:00:00:00:10; }
+phy_of() { echo phy1; }
+ip() { :; }
+wpa_supplicant() { :; }
+iw() { case "$*" in *link*) echo 'Connected to 02:00:00:00:00:20';; *) echo "iw $*";; esac; }
+sleep() { :; }
+tc() { echo "tc $*"; }
+log() { :; }
+kill() { echo "kill $*"; }
+
+# setup kills a supplicant already on its station name before creating the interface
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+psta_supplicants() { printf '555 psta-00beef\n777 psta-00cafe\n'; }
+out=$(setup "$mac" lan1)
+kill_line=$(echo "$out" | grep -nx "kill 555" | cut -d: -f1)
+add_line=$(echo "$out" | grep -n "interface add psta-00beef" | cut -d: -f1)
+[ -n "$kill_line" ] && [ -n "$add_line" ] && [ "$kill_line" -lt "$add_line" ]
+check "setup kills a leftover supplicant before adding the interface" 0 $?
+check "setup spares other stations' supplicants" 0 "$(echo "$out" | grep -cx "kill 777")"
+rm -rf "$RUN"
+
+# setup gives the supplicant no pid file: an exiting supplicant deletes its pid
+# file, which is the new one's when both were given the same path
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+wpa_supplicant() { echo "wpa_supplicant $*"; }
+out=$(setup "$mac" lan1)
+check "setup starts the supplicant without a pid file" 0 "$(echo "$out" | grep '^wpa_supplicant ' | grep -c -- ' -P ')"
+rm -rf "$RUN"
+wpa_supplicant() { :; }
+psta_supplicants() { :; }
+
+# setup redirects the port into its own station even when it elects another
+# client's station as forwarder
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+mkdir -p "$RUN/$mac"; echo psta-00beef > "$RUN/$mac/iface"; echo 100 > "$RUN/$mac/pref"
+out=$(setup "$mac2" lan1)
+check "setup elected $mac" "$mac" "$(forwarder)"
+echo "$out" | grep -qxF "tc filter add dev lan1 ingress pref 101 protocol all flower src_mac $mac2 action mirred egress redirect dev psta-00cafe"
+check "setup redirect survives an election" 0 $?
+rm -rf "$RUN"
+unset -f backhaul backhaul_mac phy_of ip wpa_supplicant iw sleep log
+
 # sweep: a station read Not connected once gets a grace period, not an immediate teardown
 RUN=$(mktemp -d); d=$RUN/$mac
 mkdir -p "$d"
@@ -382,6 +470,23 @@ check "sweep forwarder recorded" "$mac" "$(forwarder)"
 rm -rf "$RUN"
 unset -f backhaul iw bridge tc log
 
+# sweep kills a psta supplicant no client dir claims, and leaves claimed ones
+RUN=$(mktemp -d)
+mkdir -p "$RUN/$mac"; echo psta-00beef > "$RUN/$mac/iface"
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+backhaul() { echo phy1-sta0; }
+iw() { printf 'Connected to 02:00:00:00:00:20 (on phy1-sta0)\n\tfreq: 5660.0\n'; }
+bridge() { :; }
+elect() { :; }
+log() { echo "log $*"; }
+kill() { echo "kill $*"; }
+psta_supplicants() { printf '555 psta-00beef\n777 psta-00dead\n'; }
+check "sweep kills an unclaimed supplicant" "kill 777
+log killed orphan wpa_supplicant 777 on psta-00dead" "$(sweep)"
+rm -rf "$RUN"
+unset -f backhaul iw bridge elect log psta_supplicants
+PSTAD_LIB=1 . ./pstad
+
 # locked() must release its lock fd itself, and must not leak it to a
 # backgrounded child that outlives the locked call (the wpa_supplicant bug).
 RUN=$(mktemp -d)
@@ -397,6 +502,6 @@ hold2() { sleep 3 9>&- & }
 locked hold2
 flock -n "$RUN/lock" true; check "locked with fd 9 closed" 0 $?
 wait
-rm -rf "$RUN"
+rm -rf "$RUN" "$PROC"
 
 exit $fail

@@ -36,9 +36,11 @@ function into the calling shell without running anything. The test script does
 that, then redefines whichever functions or commands would touch the device
 (`iw`, `tc`, `ip`, `bridge`, `wpa_supplicant`, `kill`, `sleep`, `backhaul`,
 `backhaul_mac`, `phy_of`, `log`, `setup`, `teardown`, `write_conf`, `elect`,
-`handle`, `handle_event`) as shell functions that print their arguments or
-return canned output. Because the daemon calls these by bare name, a function
-shadows the real binary.
+`handle`, `handle_event`, `psta_supplicants`) as shell functions that print
+their arguments or return canned output. Because the daemon calls these by bare
+name, a function shadows the real binary. `PROC` points at an empty temporary
+directory for the whole run, so nothing reads the host's own `/proc`; the
+`psta_supplicants` block fills it with fake `cmdline` files.
 
 Each block sets up a temporary `RUN` directory, runs the function under test,
 and compares its output or the resulting files. Stubs are removed with
@@ -83,8 +85,8 @@ prefs and interface names.
 Do not clean up with `killall wpa_supplicant`. netifd runs its own
 `wpa_supplicant` for the backhaul station and killing it takes the repeater's
 wifi down with it. It comes back on its own within seconds, with new
-ifindexes, but every proxy station goes with it. Kill by PID from
-`$RUN/<mac>/pid`, or run `pstad teardown-all`.
+ifindexes, but every proxy station goes with it. Run `pstad teardown-all`, or
+kill the PID shown by `ps w | grep psta-` for the one station.
 
 ## Style
 

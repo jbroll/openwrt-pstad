@@ -12,6 +12,7 @@ SWEEP=${PSTA_SWEEP:-60}
 ASSOC=${PSTA_ASSOC:-20}
 DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
 HOLDOFF=${PSTA_HOLDOFF:-60}
+PROC=${PROC:-/proc}
 
 log() { logger -t pstad "$*"; }
 
@@ -85,6 +86,41 @@ held() {
 
 sta_connected() { iw dev "$1" link 2>/dev/null | grep -q '^Connected to'; }
 
+# "PID IFACE" for every wpa_supplicant on a psta-* station, found by command
+# line because an exiting supplicant deletes its pid file even when a newer one
+# wrote it. See "Supplicants are found by command line" in docs/architecture.md.
+psta_supplicants() {
+	for sf in $(grep -l -F wpa_supplicant "$PROC"/[0-9]*/cmdline 2>/dev/null); do
+		tr '\0' '\n' 2>/dev/null < "$sf" | {
+			read -r argv0 || exit 0
+			case "$argv0" in *wpa_supplicant) ;; *) exit 0 ;; esac
+			while read -r arg; do
+				[ "$arg" = -i ] || continue
+				read -r arg
+				case "$arg" in psta-*) spid=${sf%/cmdline}; echo "${spid##*/} $arg" ;; esac
+			done
+		}
+	done
+}
+
+kill_supplicants() {  # IFACE
+	psta_supplicants | while read -r spid siface; do
+		[ "$siface" = "$1" ] && kill "$spid" 2>/dev/null
+	done
+	return 0
+}
+
+# An unclaimed supplicant holds a client's MAC upstream against its real
+# association, and blocks the client's next setup.
+reap_orphans() {
+	psta_supplicants | while read -r spid siface; do
+		mac_of_iface "$siface" >/dev/null && continue
+		kill "$spid" 2>/dev/null
+		log "killed orphan wpa_supplicant $spid on $siface"
+	done
+	return 0
+}
+
 mac_of_iface() {
 	for d in "$RUN"/*/; do
 		[ -s "$d/iface" ] && [ "$(cat "$d/iface")" = "$1" ] && { basename "$d"; return 0; }
@@ -151,8 +187,9 @@ add_group_rule() {  # IFACE
 }
 
 # Keeps the current forwarder while its station is connected; otherwise moves
-# the rule to any connected station.
-elect() {
+# the rule to any connected station. A subshell body, because its loop would
+# otherwise overwrite the caller's d and iface, and setup uses iface after it.
+elect() (
 	f=$(forwarder)
 	if [ -n "$f" ]; then
 		[ -s "$RUN/$f/iface" ] && sta_connected "$(cat "$RUN/$f/iface")" && return 0
@@ -169,7 +206,7 @@ elect() {
 		return 0
 	done
 	return 1
-}
+)
 
 setup() {  # MAC PORT
 	mac=$1 port=$2 d=$RUN/$1
@@ -178,11 +215,12 @@ setup() {  # MAC PORT
 	mkdir -p "$d"
 	echo "$iface" > "$d/iface"; echo "$port" > "$d/port"; echo "$pref" > "$d/pref"
 	echo 0 > "$d/count"; date +%s > "$d/seen"
+	kill_supplicants "$iface"
 	# EAPOL must reach hostapd and the supplicant, never the redirect.
 	iw phy "$(phy_of "$(backhaul)")" interface add "$iface" type managed addr "$mac" &&
 	ip link set "$iface" up &&
 	# 9>&- closes the lock fd, or the daemonized supplicant holds it forever.
-	wpa_supplicant -B -D nl80211 -i "$iface" -c "$CONF" -P "$d/pid" 9>&- &&
+	wpa_supplicant -B -D nl80211 -i "$iface" -c "$CONF" 9>&- &&
 	tc qdisc add dev "$iface" clsact &&
 	tc filter add dev "$iface" ingress pref 1 protocol 0x888e flower action pass &&
 	tc filter add dev "$iface" ingress pref 2 protocol all flower dst_mac "$mac" \
@@ -221,7 +259,7 @@ teardown() {  # MAC
 	[ "$(forwarder)" = "$1" ] && { rm -f "$RUN/forwarder"; reelect=1; }
 	[ -n "$port" ] && [ -n "$pref" ] && tc filter del dev "$port" ingress pref "$pref" 2>/dev/null
 	[ -n "$pref" ] && tc filter del dev "$(backhaul)" ingress pref "$pref" 2>/dev/null
-	[ -s "$d/pid" ] && kill "$(cat "$d/pid")" 2>/dev/null
+	[ -n "$iface" ] && kill_supplicants "$iface"
 	[ -n "$iface" ] && iw dev "$iface" del 2>/dev/null
 	rm -rf "$d"
 	log "down $1"
@@ -236,6 +274,7 @@ teardown_all() {
 		[ -d "$d" ] && [ "$(basename "$d")" != holdoff ] && teardown "$(basename "$d")"
 	done
 	rm -rf "$RUN/holdoff"
+	reap_orphans
 	for port in $ports; do
 		tc filter del dev "$port" ingress pref 1 2>/dev/null
 		tc qdisc del dev "$port" clsact 2>/dev/null
@@ -330,6 +369,7 @@ sweep() {
 			teardown "$(basename "$d")"
 		fi
 	done
+	reap_orphans
 	elect
 	bridge fdb show br "$BRIDGE" | while read -r l; do handle "$l"; done
 }

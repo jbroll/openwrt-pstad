@@ -33,6 +33,8 @@ The timer loop. Every `PSTA_SWEEP` seconds it:
 - reads the packet counter on the client's port-side redirect. A rising
   counter updates `seen`; a counter unchanged for `PSTA_IDLE` seconds tears the
   client down.
+- kills any `wpa_supplicant` on a `psta-*` station that no client directory
+  claims, logging `killed orphan wpa_supplicant <pid> on <iface>`.
 - confirms the group-frame forwarder is still connected, electing another
   client's station if not.
 - re-reads `bridge fdb show` once, so a client torn down and back within the
@@ -42,7 +44,8 @@ The timer loop. Every `PSTA_SWEEP` seconds it:
 
 Removes every station, every per-client rule, the per-port EAPOL pass rule and
 `clsact` qdisc on each port that had one, the backhaul's `clsact`, and the
-supplicant config. The init script runs this after both instances have
+supplicant config, and kills any `wpa_supplicant` still running on a `psta-*`
+station. The init script runs this after both instances have
 stopped. Safe with no clients present.
 
 ### `pstad status`
@@ -64,7 +67,7 @@ command line for a manual run.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `pid`, `count`, `seen` and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
+| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `count`, `seen` and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
 | `ALLOW` | `/etc/psta/allow` | Allowlist path |
 | `PSTA_BRIDGE` | `br-lan` | The LAN bridge whose ports carry clients; group frames are redirected into it |
 | `PSTA_IDLE` | `300` | Seconds without the redirect counter rising before a client is torn down |

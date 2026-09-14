@@ -300,6 +300,23 @@ cover exactly this.
 half-written client directory from an interrupted setup never causes a
 `tc filter del` against some other client's port or pref.
 
+### Supplicants are found by command line
+
+A `wpa_supplicant` keeps running when its interface is deleted, and takes over
+a new interface created under the same name. One that a teardown failed to kill
+therefore fights every later setup for that client: each new station times out
+waiting for association, and the client has no upstream path until the process
+is killed by hand.
+
+A pid file cannot track them. A supplicant deletes its pid file when it exits,
+so an old supplicant still shutting down while the next one for the same client
+starts deletes the new one's file, and the next teardown has nothing to kill.
+That was confirmed on a repeater with two supplicants given one `-P` path. So
+supplicants get no pid file. `setup` and `teardown` kill every supplicant whose
+command line in `/proc/<pid>/cmdline` names the station with `-i psta-xxxxxx`,
+and every sweep and `teardown-all` kill any supplicant on a `psta-*` station
+that no client directory claims.
+
 ## Why relayd cannot coexist
 
 Measured on one host behind a repeater, three ways within the same minute:
