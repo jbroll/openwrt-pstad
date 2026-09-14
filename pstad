@@ -111,20 +111,25 @@ kill_supplicants() {  # IFACE
 	return 0
 }
 
-# kill only signals: a supplicant still shutting down would take the interface
-# setup creates next, leaving two supplicants on one station.
-clear_station() {  # IFACE
-	kill_supplicants "$1"
+# kill only signals, so a supplicant can outlive the call by a moment. Waits up
+# to KILL_WAIT for none left on IFACE, or on any psta station without one.
+await_exit() {  # [IFACE]
 	waited=0
-	while psta_supplicants | grep -q " $1\$"; do
-		if [ "$waited" -ge "$KILL_WAIT" ]; then
-			log "supplicant on $1 did not exit in ${KILL_WAIT}s"
-			return 1
-		fi
+	while psta_supplicants | grep -q " ${1:-psta-.*}\$"; do
+		[ "$waited" -ge "$KILL_WAIT" ] && return 1
 		sleep 1
 		waited=$(( waited + 1 ))
 	done
 	return 0
+}
+
+# A supplicant still shutting down would take the interface setup creates next,
+# leaving two supplicants on one station.
+clear_station() {  # IFACE
+	kill_supplicants "$1"
+	await_exit "$1" && return 0
+	log "supplicant on $1 did not exit in ${KILL_WAIT}s"
+	return 1
 }
 
 # An unclaimed supplicant holds a client's MAC upstream against its real
@@ -291,6 +296,9 @@ teardown_all() {
 		[ -d "$d" ] && [ "$(basename "$d")" != holdoff ] && teardown "$(basename "$d")"
 	done
 	rm -rf "$RUN/holdoff"
+	# The teardowns above only signalled their supplicants; reaping at once
+	# would log each one as an orphan.
+	await_exit
 	reap_orphans
 	for port in $ports; do
 		tc filter del dev "$port" ingress pref 1 2>/dev/null

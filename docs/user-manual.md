@@ -46,8 +46,9 @@ The timer loop. Every `PSTA_SWEEP` seconds it:
 
 Removes every station, every per-client rule, the per-port EAPOL pass rule and
 `clsact` qdisc on each port that had one, the backhaul's `clsact`, and the
-supplicant config, and kills any `wpa_supplicant` still running on a `psta-*`
-station. The init script runs this after both instances have
+supplicant config. It then waits up to 3 s for the supplicants it signalled to
+exit, and kills any `wpa_supplicant` still running on a `psta-*` station after
+that, logging it as an orphan. The init script runs this after both instances have
 stopped. Safe with no clients present.
 
 ### `pstad status`

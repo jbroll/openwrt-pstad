@@ -320,7 +320,9 @@ that no client directory claims.
 `kill` only sends the signal, and a supplicant still shutting down would take
 the interface `setup` creates next. So `setup` waits, checking once a second
 for up to 3 s, until no supplicant names the station. If one is still there,
-the setup fails and is torn down. As a backstop, a sweep that finds more than
+the setup fails and is torn down. `teardown-all` likewise waits up to 3 s for
+the supplicants its teardowns signalled before it looks for orphans, so only a
+supplicant that outlives that wait is logged as one. As a backstop, a sweep that finds more than
 one supplicant on a claimed station tears that client down, and the same
 sweep's fdb pass rebuilds it with one. The `flock` does not cover any of this.
 It serialises pstad's own actions, and these races are with processes that

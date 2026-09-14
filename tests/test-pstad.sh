@@ -221,10 +221,24 @@ iw() { :; }
 tc() { :; }
 log() { :; }
 kill() { echo "kill $*"; }
+sleep() { :; }
 psta_supplicants() { echo '777 psta-00dead'; }
 check "teardown_all kills unclaimed supplicants" "kill 777" "$(teardown_all)"
 rm -rf "$RUN"
-unset -f iw tc log
+
+# teardown_all waits for the supplicants its teardowns signalled before looking
+# for orphans, so a supplicant still exiting is not logged as one
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+mkdir -p "$RUN/$mac"; echo psta-00beef > "$RUN/$mac/iface"
+: > "$RUN/alive"
+log() { echo "log $*"; }
+sleep() { echo "sleep $*"; rm -f "$RUN/alive"; }
+psta_supplicants() { [ -f "$RUN/alive" ] && echo '555 psta-00beef'; }
+out=$(teardown_all)
+check "teardown_all logs no orphan for a supplicant still exiting" 0 "$(echo "$out" | grep -c 'killed orphan')"
+check "teardown_all waits for signalled supplicants" 1 "$(echo "$out" | grep -c '^sleep ')"
+rm -rf "$RUN"
+unset -f iw tc log sleep
 psta_supplicants() { :; }
 
 # elect: keeps a connected forwarder, moves the rule off a disconnected one,
