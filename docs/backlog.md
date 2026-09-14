@@ -14,7 +14,12 @@ for overflow.
 `disconnected (by AP)` on a proxy station is handled by the same code as a
 client leaving, and covered by the unit tests, but has not been provoked on a
 device. It needs an upstream access point that deauthenticates the old
-association when the same MAC associates to another of its radios.
+association when the same MAC associates again. A Verizon Fios router does
+not: tested by giving a client on the repeater the MAC of a host associated to
+the Fios directly, the router kept both associations and delivered the MAC's
+traffic to the newer one, and neither side received a deauthentication. On
+that router the repeater's own `del station` event is the only roam signal,
+and a MAC collision is silent.
 
 ## Wired clients that unplug
 

@@ -230,6 +230,13 @@ client was proxied again 17 s later after it reassociated.
 `iw event` writes each line as it happens even when its output is a pipe, so
 the monitor reads it through the same FIFO as `bridge monitor fdb`.
 
+Whether the upstream access point ever sends the `disconnected (by AP)` event
+depends on the router. A Verizon Fios unit keeps both associations when the
+same MAC associates twice and delivers to the newer one, so a client roaming
+from the repeater to the router simply wins, and the repeater's own `del
+station` event is what tears its station down. See
+[backlog.md](backlog.md).
+
 The `clsact` qdisc on the port and on the backhaul is added with errors
 ignored, since it may already exist from an earlier client; on the client's
 own station it is always fresh.
