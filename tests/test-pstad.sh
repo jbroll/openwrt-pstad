@@ -159,11 +159,17 @@ mkdir -p "$RUN/mac1" "$RUN/mac2"
 printf 'ifaceA\n' > "$RUN/mac1/iface"; printf 'lan1\n' > "$RUN/mac1/port"; printf '101\n' > "$RUN/mac1/pref"
 printf 'ifaceB\n' > "$RUN/mac2/iface"; printf 'phy0-ap0\n' > "$RUN/mac2/port"; printf '102\n' > "$RUN/mac2/pref"
 echo mac1 > "$RUN/forwarder"
+holdoff "$mac"
 : > "$CONF"
 iw() { :; }
 tc() { echo "tc $*"; }
 backhaul() { echo phy1-sta0; }
+log() { echo "log $*"; }
 out=$(teardown_all)
+echo "$out" | grep -q "down holdoff"
+check "teardown_all skips the holdoff dir" 1 $?
+[ -d "$RUN/holdoff" ]; check "teardown_all clears holdoffs" 1 $?
+unset -f log
 echo "$out" | grep -qxF 'tc qdisc del dev lan1 clsact'
 check "teardown_all clears lan1 clsact" 0 $?
 echo "$out" | grep -qxF 'tc qdisc del dev phy0-ap0 clsact'

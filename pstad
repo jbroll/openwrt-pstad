@@ -232,7 +232,10 @@ teardown() {  # MAC
 teardown_all() {
 	rm -f "$RUN/forwarder"
 	ports=$(for d in "$RUN"/*/; do [ -f "$d/port" ] && cat "$d/port"; done | sort -u)
-	for d in "$RUN"/*/; do [ -d "$d" ] && teardown "$(basename "$d")"; done
+	for d in "$RUN"/*/; do
+		[ -d "$d" ] && [ "$(basename "$d")" != holdoff ] && teardown "$(basename "$d")"
+	done
+	rm -rf "$RUN/holdoff"
 	for port in $ports; do
 		tc filter del dev "$port" ingress pref 1 2>/dev/null
 		tc qdisc del dev "$port" clsact 2>/dev/null
