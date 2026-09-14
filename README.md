@@ -16,8 +16,8 @@ anywhere on the LAN. relayd, OpenWrt's usual answer, hides every host behind
 the repeater's one station MAC and loses all of those.
 
 ```sh
-# On the repeater: proxy one client, then watch it come up.
-echo 02:00:00:00:be:ef > /etc/psta/allow
+# On the repeater: proxy every client, then watch one come up.
+echo '*' > /etc/psta/allow
 /etc/init.d/pstad restart
 pstad status
 # 02:00:00:00:be:ef psta-00beef on lan1, 412 pkts, seen Mon Sep 14 10:22:07 UTC 2026
@@ -41,8 +41,7 @@ relayd must not run alongside it.
 - [docs/architecture.md](docs/architecture.md): why a station cannot bridge,
   the option space, the per-phy station limit, and how the rules work.
 - [docs/development.md](docs/development.md): layout and tests.
-- [docs/backlog.md](docs/backlog.md): what is missing before `*` in the
-  allowlist is safe on a busy repeater.
+- [docs/backlog.md](docs/backlog.md): open work.
 
 The companion repo [wr1800k-openwrt](https://github.com/jbroll/wr1800k-openwrt) builds and flashes a
 credentialed OpenWrt image for the Fenvi WR1800K with this daemon baked in as

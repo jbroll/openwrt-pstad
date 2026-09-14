@@ -132,8 +132,9 @@ For each allowlisted client the bridge learns, `setup` creates a managed
 interface on the backhaul phy named `psta-<last six hex digits of the MAC>`
 with the client's MAC as its address, brings it up, and starts one
 `wpa_supplicant -B -D nl80211` on it. Every station shares one config,
-`$RUN/wpa.conf`, written once from the backhaul's `wifi-iface` in UCI (SSID
-and key) and the backhaul's live `iw dev ... link` (BSSID and frequency):
+`$RUN/wpa.conf`, written once from the backhaul's `wifi-iface` in UCI (SSID,
+key and encryption) and the backhaul's live `iw dev ... link` (BSSID and
+frequency):
 
 ```
 network={
@@ -145,6 +146,11 @@ network={
 	psk="<key>"
 }
 ```
+
+The two auth lines follow the backhaul's `encryption`: `sae` gives
+`key_mgmt=SAE` with `ieee80211w=2`, any `psk*` value gives `WPA-PSK` with
+`ieee80211w=1`, and `sae-mixed` or an unset value gives `SAE WPA-PSK` with
+`ieee80211w=1`.
 
 Pinning to the BSSID and frequency is what keeps every station within the
 `#channels <= 1` combination. The file is written under `umask 077` in a
@@ -160,26 +166,69 @@ client's station interface, ingress (frames arriving from the air):
 |---|---|---|---|
 | 1 | `protocol 0x888e` (EAPOL) | pass | The 4-way handshake and rekeys must reach the supplicant, never the redirect |
 | 2 | `dst_mac <client>` | mirred egress redirect to the port | Unicast for the client goes down to its bridge port |
-| 3 | `src_mac <backhaul station MAC>` | drop | The AP re-broadcasts the repeater's own upstream broadcasts to every station; sent back down they read as the repeater claiming a neighbour's address. Sits before pref 4 so those copies never reach the port |
-| 4 | `dst_mac 01:00:00:00:00:00/01:00:00:00:00:00` | mirred egress redirect to the port | Group and broadcast frames pass down unaltered, so an ARP answer reaches the asking client directly |
+| 3 | `src_mac <backhaul station MAC>` | drop | The AP re-broadcasts the repeater's own upstream broadcasts to every station; sent back down they read as the repeater claiming a neighbour's address. Sits before pref 4 so those copies never reach the LAN |
+| 4 | `dst_mac 01:00:00:00:00:00/01:00:00:00:00:00` | mirred egress redirect to `br-lan` | Group and broadcast frames go down into the bridge, which floods them to every port. Present on one elected station only; see below |
 
 On the backhaul station, ingress:
 
 | pref | match | action | why |
 |---|---|---|---|
-| `pref_for(client)` | `src_mac <client>` | drop | The AP echoes the client's own frames back to the backhaul. Anything listening behind tc ingress on the backhaul (relayd's sockets, the bridge) would otherwise see the client as an upstream host |
+| `<client pref>` | `src_mac <client>` | drop | The AP echoes the client's own frames back to the backhaul. Anything listening behind tc ingress on the backhaul (relayd's sockets, the bridge) would otherwise see the client as an upstream host |
 
 On the client's bridge port (`lan1`, `phy0-ap0`, ...), ingress:
 
 | pref | match | action | why |
 |---|---|---|---|
 | 1 | `protocol 0x888e` | pass | Shared by every client on the port. A client authenticating to the repeater's own AP must not have its EAPOL redirected |
-| `pref_for(client)` | `src_mac <client>` | mirred egress redirect to the client's station | Everything the client sends goes up its own station and out with its own MAC |
+| `<client pref>` | `src_mac <client>` | mirred egress redirect to the client's station | Everything the client sends goes up its own station and out with its own MAC |
 
-`pref_for` is the low 16 bits of the MAC as an integer, mod 65000, plus 100,
-so per-client prefs start at 100 and never collide with the fixed prefs 1
-through 4. Two clients whose last two octets match do collide with each other;
-see [backlog.md](backlog.md).
+A client's pref is the lowest integer from 100 not held by another client, read
+from the `pref` files under `$RUN` at setup and stored in the client's own, so
+prefs never collide with the fixed rules or with each other. Setup runs under
+the daemon's lock, so two clients cannot draw the same value.
+
+### One forwarder for group frames
+
+The access point hands its copy of every downstream broadcast to each
+associated station, so with N proxy stations an unmodified rule set would
+inject each broadcast into the LAN N times. Measured on a bench with three
+proxied clients: a broadcast ping from the upstream side arrived three times at
+a client with a group rule on every station, and once with the rule on one.
+
+So only one station carries pref 4, and it redirects into the bridge rather
+than to its own client's port, so every port receives the frame. `elect`
+picks it: the current forwarder stays while its station reads connected;
+otherwise its rule is deleted, and the first client whose station is connected
+takes the rule and is recorded in `$RUN/forwarder`. `elect` runs at the end of
+every setup once the new station has associated, whenever the forwarder is
+torn down, and at the end of every sweep. With no client up there is no
+forwarder and nothing needs one.
+
+### Clients that leave
+
+A client that roams from the repeater to the upstream access point, or goes to
+sleep, would otherwise leave its station associated under the client's MAC for
+the whole idle window, against the client's real association elsewhere. The
+monitor therefore also reads `iw event`, which reports every station the
+repeater's own access point adds or removes:
+
+| event | action |
+|---|---|
+| `<port>: del station <mac>` for a proxied client on that port | tear the client down, delete its fdb entry on that port, and hold the MAC off |
+| `<station>: disconnected (by AP)` for a proxy station | the same, looked up by interface name |
+| `<port>: new station <mac>` | clear any hold-off on the MAC |
+
+The fdb deletion matters because the sweep re-reads `bridge fdb show` and
+would otherwise re-proxy the client from its stale entry. The hold-off,
+`PSTA_HOLDOFF` seconds (60 by default), covers frames still in flight after
+the teardown. A client that comes back raises `new station` first, which clears
+the hold-off before its first frame is learned, so a real return is not
+delayed. On the bench a kicked client was torn down within a second of the
+event, the forwarder role moved to another client in the same second, and the
+client was proxied again 17 s later after it reassociated.
+
+`iw event` writes each line as it happens even when its output is a pipe, so
+the monitor reads it through the same FIFO as `bridge monitor fdb`.
 
 The `clsact` qdisc on the port and on the backhaul is added with errors
 ignored, since it may already exist from an earlier client; on the client's
@@ -229,12 +278,12 @@ pinned to the old BSSID and frequency.
 ### Two instances under one lock
 
 procd runs `pstad monitor` and `pstad sweep` as two instances so neither
-needs job control. The monitor blocks on `bridge monitor fdb` and reacts to
-clients arriving or moving ports; the sweep runs every `PSTA_SWEEP` seconds
-(60 by default). The monitor runs each fdb line's handler, and the sweep each
-pass, through `locked`, which takes `flock` on `$RUN/lock` on fd 9 for the
-duration of the call, so a setup and a teardown for the same client never
-interleave.
+needs job control. The monitor blocks on a FIFO fed by `bridge monitor fdb`
+and `iw event`, reacting to clients arriving, moving ports or leaving; the
+sweep runs every `PSTA_SWEEP` seconds (60 by default). The monitor runs each
+line's handler, and the sweep each pass, through `locked`, which takes `flock`
+on `$RUN/lock` on fd 9 for the duration of the call, so a setup and a teardown
+for the same client never interleave.
 
 `wpa_supplicant -B` daemonises and would inherit fd 9 and hold the lock
 forever, so its command line closes the descriptor with `9>&-`. The tests

@@ -10,11 +10,14 @@ the others are for the shell.
 The event loop. Writes the shared supplicant config (retrying every 5 s until
 the backhaul is associated), then reads `bridge fdb show br br-lan` once to
 pick up clients already present, and after that reads `bridge monitor fdb`
-through a FIFO at `$RUN/fifo`. Every learned entry for an allowlisted MAC
-triggers a setup; an entry showing a known client on a different port tears the
-old station down and rebuilds it on the new port. Entries marked `Deleted`,
-`permanent` or `self` are ignored. Exits on TERM or INT after killing the
-monitor child.
+and `iw event` through a FIFO at `$RUN/fifo`. Every learned fdb entry for an
+allowlisted MAC triggers a setup; an entry showing a known client on a
+different port tears the old station down and rebuilds it on the new port.
+Entries marked `Deleted`, `permanent` or `self` are ignored, as is a MAC on
+hold-off. From `iw event`, a `del station` on a proxied client's port, or a
+`disconnected (by AP)` on a proxy station, tears the client down, deletes its
+fdb entry and holds the MAC off for `PSTA_HOLDOFF` seconds; a `new station`
+clears the hold-off. Exits on TERM or INT after killing both children.
 
 ### `pstad sweep`
 
@@ -30,6 +33,8 @@ The timer loop. Every `PSTA_SWEEP` seconds it:
 - reads the packet counter on the client's port-side redirect. A rising
   counter updates `seen`; a counter unchanged for `PSTA_IDLE` seconds tears the
   client down.
+- confirms the group-frame forwarder is still connected, electing another
+  client's station if not.
 - re-reads `bridge fdb show` once, so a client torn down and back within the
   bridge's ageing window, which raises no fdb event, is picked up again.
 
@@ -45,11 +50,12 @@ stopped. Safe with no clients present.
 One line per client:
 
 ```
-<mac> <iface> on <port>, <count> pkts, seen <date>
+<mac> <iface> on <port>, <count> pkts, seen <date>[, forwards group frames]
 ```
 
 `count` is the last value read from the redirect counter by the sweep, so it
-lags by up to one sweep interval.
+lags by up to one sweep interval. Exactly one line carries `forwards group
+frames` while any client is up.
 
 ## Environment
 
@@ -58,12 +64,14 @@ command line for a manual run.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `pid`, `count`, `seen` and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo` and `lock` |
+| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `pid`, `count`, `seen` and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
 | `ALLOW` | `/etc/psta/allow` | Allowlist path |
+| `PSTA_BRIDGE` | `br-lan` | The LAN bridge whose ports carry clients; group frames are redirected into it |
 | `PSTA_IDLE` | `300` | Seconds without the redirect counter rising before a client is torn down |
 | `PSTA_SWEEP` | `60` | Seconds between sweeps |
 | `PSTA_ASSOC` | `20` | Seconds to wait for a new station to associate before giving up and tearing it down |
 | `PSTA_DOWN_GRACE` | `120` | Seconds a station may read not connected before it is torn down |
+| `PSTA_HOLDOFF` | `60` | Seconds a client torn down for leaving is ignored if re-learned from stale frames; cleared early when the AP reports it back |
 
 ## The allowlist
 
@@ -77,9 +85,11 @@ take effect without a restart for new clients; an already-proxied client that
 is removed from the list stays up until its idle timer fires or the service
 restarts.
 
-`*` is not yet safe on a repeater with many clients or clients that roam
-between the repeater and the upstream access point; [backlog.md](backlog.md)
-lists what has to land first.
+`*` is the setting for a deployed repeater. A MAC list is for a bench or for a
+repeater that must serve only known hosts. The phy's station limit still
+applies: on MT7915 the 19th client's station fails to come up and that client
+is left with no path, since there is no relayd to fall back to. See
+[backlog.md](backlog.md).
 
 ## install.sh
 
@@ -150,4 +160,7 @@ Messages:
 | `<iface> did not associate in <n>s` | The client's station never connected; setup rolled back |
 | `setup failed for <mac> on <port>` | Some step of setup failed; see the preceding line |
 | `<iface> lost association` | The station read not connected for the whole grace period |
+| `<mac> left <port>` | The repeater's AP reported the client gone; torn down and held off |
+| `<iface> disconnected by the AP` | The upstream AP dropped the proxy station; torn down and held off |
+| `<iface> forwards group frames` | That station now carries the single group-frame rule |
 | `backhaul now on <bssid>, dropping every station` | The backhaul moved; all stations rebuilt against the new BSSID |

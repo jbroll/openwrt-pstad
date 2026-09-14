@@ -1,15 +1,17 @@
 #!/bin/sh
 # pstad: gives each allowlisted client behind this repeater its own station on
-# the backhaul radio, carrying the client's MAC. Forwarding is two tc redirect
+# the backhaul radio, carrying the client's MAC. Forwarding is tc redirect
 # rules per client; this script only manages lifecycle. See docs/architecture.md.
 
 RUN=${RUN:-/var/run/psta}
 ALLOW=${ALLOW:-/etc/psta/allow}
 CONF=$RUN/wpa.conf
+BRIDGE=${PSTA_BRIDGE:-br-lan}
 IDLE=${PSTA_IDLE:-300}
 SWEEP=${PSTA_SWEEP:-60}
 ASSOC=${PSTA_ASSOC:-20}
 DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
+HOLDOFF=${PSTA_HOLDOFF:-60}
 
 log() { logger -t pstad "$*"; }
 
@@ -23,6 +25,22 @@ fdb_learned() {
 	printf '%s %s\n' "$1" "$3"
 }
 
+# One iw event line -> "arrive IFACE MAC", "leave IFACE MAC" or "kicked IFACE".
+# iw prints "IFACE (phy #N): new station MAC"; the MAC is the last word.
+iw_event() {
+	case "$1" in
+	*": new station "*) ev=arrive ;;
+	*": del station "*) ev=leave ;;
+	*": disconnected (by AP)"*) ev=kicked ;;
+	*) return 1 ;;
+	esac
+	set -- $1
+	iface=${1%:}
+	if [ "$ev" = kicked ]; then printf 'kicked %s\n' "$iface"; return 0; fi
+	for mac; do :; done
+	printf '%s %s %s\n' "$ev" "$iface" "$mac"
+}
+
 # stdin: iw dev X link. Prints "BSSID FREQ", nothing when not connected.
 link_params() {
 	echo $(sed -n 's/^Connected to \([0-9a-f:]*\).*/\1/p; s/^[[:space:]]*freq: \([0-9]*\).*/\1/p')
@@ -34,13 +52,45 @@ sent_pkts() {
 }
 
 iface_for() { printf 'psta-%s\n' "$(printf %s "$1" | tr -d : | tail -c 6)"; }
-# pref 1 on each port is the shared EAPOL pass rule; clients start at 100.
-pref_for() { echo $(( 0x$(printf %s "$1" | tr -d : | tail -c 4) % 65000 + 100 )); }
+
+# Prefs 1-4 are the fixed rules; clients take the lowest free value from 100.
+alloc_pref() {
+	used=$(cat "$RUN"/*/pref 2>/dev/null)
+	p=100
+	while printf '%s\n' "$used" | grep -qx "$p"; do p=$(( p + 1 )); done
+	echo "$p"
+}
+
+# Supplicant auth lines for the backhaul's encryption setting.
+key_mgmt() {  # ENCRYPTION
+	case "$1" in
+	sae)  printf 'key_mgmt=SAE\nieee80211w=2\n' ;;
+	psk*) printf 'key_mgmt=WPA-PSK\nieee80211w=1\n' ;;
+	*)    printf 'key_mgmt=SAE WPA-PSK\nieee80211w=1\n' ;;
+	esac
+}
 
 # A lone "*" line proxies every client; otherwise the MAC must be listed.
 allowed() { [ -f "$ALLOW" ] || return 1; grep -qxF '*' "$ALLOW" && return 0; grep -qix "$1" "$ALLOW"; }
 
+# A client just torn down for leaving is not re-added from a stale fdb entry
+# until HOLDOFF has passed or the AP reports it back.
+holdoff() { mkdir -p "$RUN/holdoff"; date +%s > "$RUN/holdoff/$1"; }
+held() {
+	[ -s "$RUN/holdoff/$1" ] || return 1
+	[ $(( $(date +%s) - $(cat "$RUN/holdoff/$1") )) -lt "$HOLDOFF" ] && return 0
+	rm -f "$RUN/holdoff/$1"
+	return 1
+}
+
 sta_connected() { iw dev "$1" link 2>/dev/null | grep -q '^Connected to'; }
+
+mac_of_iface() {
+	for d in "$RUN"/*/; do
+		[ -s "$d/iface" ] && [ "$(cat "$d/iface")" = "$1" ] && { basename "$d"; return 0; }
+	done
+	return 1
+}
 
 # The port-side redirect must not exist before the station can carry frames:
 # every frame the client sends would go into an unassociated interface and the
@@ -71,6 +121,7 @@ write_conf() {
 	[ -n "$sec" ] || { rm -f "$RUN/bssid"; return 1; }
 	ssid=$(uci get "wireless.$sec.ssid") || { rm -f "$RUN/bssid"; return 1; }
 	psk=$(uci get "wireless.$sec.key") || { rm -f "$RUN/bssid"; return 1; }
+	auth=$(key_mgmt "$(uci -q get "wireless.$sec.encryption")")
 	mkdir -p "$RUN"
 	# Subshell umask keeps the PSK out of the conf file's initial permissions,
 	# instead of a window between create and chmod.
@@ -80,8 +131,7 @@ write_conf() {
 		ssid="$ssid"
 		bssid=$1
 		freq_list=$2
-		key_mgmt=SAE WPA-PSK
-		ieee80211w=1
+		$auth
 		psk="$psk"
 	}
 	EOF
@@ -89,10 +139,42 @@ write_conf() {
 	echo "$1" > "$RUN/bssid"
 }
 
+forwarder() { cat "$RUN/forwarder" 2>/dev/null; }
+
+# Every station receives the AP's copy of each downstream broadcast, so only
+# one carries the group-frame rule. It redirects into the bridge, not a port,
+# so every port gets the frame.
+add_group_rule() {  # IFACE
+	tc filter add dev "$1" ingress pref 4 protocol all \
+		flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 \
+		action mirred egress redirect dev "$BRIDGE"
+}
+
+# Keeps the current forwarder while its station is connected; otherwise moves
+# the rule to any connected station.
+elect() {
+	f=$(forwarder)
+	if [ -n "$f" ]; then
+		[ -s "$RUN/$f/iface" ] && sta_connected "$(cat "$RUN/$f/iface")" && return 0
+		[ -s "$RUN/$f/iface" ] && tc filter del dev "$(cat "$RUN/$f/iface")" ingress pref 4 2>/dev/null
+		rm -f "$RUN/forwarder"
+	fi
+	for d in "$RUN"/*/; do
+		[ -s "$d/iface" ] && [ -s "$d/pref" ] || continue
+		read -r iface < "$d/iface"
+		sta_connected "$iface" || continue
+		add_group_rule "$iface" || continue
+		basename "$d" > "$RUN/forwarder"
+		log "$iface forwards group frames"
+		return 0
+	done
+	return 1
+}
+
 setup() {  # MAC PORT
 	mac=$1 port=$2 d=$RUN/$1
 	[ -s "$RUN/bssid" ] || { log "no backhaul, not adding $mac"; return 1; }
-	iface=$(iface_for "$mac") pref=$(pref_for "$mac")
+	iface=$(iface_for "$mac") pref=$(alloc_pref)
 	mkdir -p "$d"
 	echo "$iface" > "$d/iface"; echo "$port" > "$d/port"; echo "$pref" > "$d/pref"
 	echo 0 > "$d/count"; date +%s > "$d/seen"
@@ -105,19 +187,15 @@ setup() {  # MAC PORT
 	tc filter add dev "$iface" ingress pref 1 protocol 0x888e flower action pass &&
 	tc filter add dev "$iface" ingress pref 2 protocol all flower dst_mac "$mac" \
 		action mirred egress redirect dev "$port" &&
-	# relayd re-issues local broadcasts upstream as the backhaul; the AP hands
-	# them to every station, and sent back down they read as the repeater
-	# claiming a neighbour's address. Drop those, then pass group frames down
-	# unaltered so ARP answers reach the asker rather than relayd.
+	# The AP hands the repeater's own upstream broadcasts back to every
+	# station; sent down they read as the repeater claiming a neighbour's
+	# address. Sits before the group rule so those copies never reach the LAN.
 	tc filter add dev "$iface" ingress pref 3 protocol all flower src_mac "$(backhaul_mac)" \
 		action drop &&
-	tc filter add dev "$iface" ingress pref 4 protocol all \
-		flower dst_mac 01:00:00:00:00:00/01:00:00:00:00:00 \
-		action mirred egress redirect dev "$port" &&
 	wait_assoc "$iface" &&
-	# The AP rebroadcasts the client's own frames to the backhaul, where relayd
-	# would re-issue its ARP as the bridge's and learn it as an upstream host.
-	# relayd's sockets sit behind tc ingress, so a drop here hides the echo.
+	{ elect; true; } &&
+	# The AP rebroadcasts the client's own frames to the backhaul, where
+	# anything listening behind tc ingress would learn it as an upstream host.
 	{ tc qdisc add dev "$(backhaul)" clsact 2>/dev/null; true; } &&
 	tc filter add dev "$(backhaul)" ingress pref "$pref" protocol all flower src_mac "$mac" \
 		action drop &&
@@ -136,19 +214,23 @@ teardown() {  # MAC
 	d=$RUN/$1; [ -d "$d" ] || return 0
 	# A half-written client dir leaves stale values from a prior call; an
 	# empty var here must never be treated as some other client's device.
-	unset iface port pref
+	unset iface port pref reelect
 	[ -s "$d/iface" ] && read -r iface < "$d/iface"
 	[ -s "$d/port" ] && read -r port < "$d/port"
 	[ -s "$d/pref" ] && read -r pref < "$d/pref"
+	[ "$(forwarder)" = "$1" ] && { rm -f "$RUN/forwarder"; reelect=1; }
 	[ -n "$port" ] && [ -n "$pref" ] && tc filter del dev "$port" ingress pref "$pref" 2>/dev/null
 	[ -n "$pref" ] && tc filter del dev "$(backhaul)" ingress pref "$pref" 2>/dev/null
 	[ -s "$d/pid" ] && kill "$(cat "$d/pid")" 2>/dev/null
 	[ -n "$iface" ] && iw dev "$iface" del 2>/dev/null
 	rm -rf "$d"
 	log "down $1"
+	[ -n "$reelect" ] && { elect; true; }
+	return 0
 }
 
 teardown_all() {
+	rm -f "$RUN/forwarder"
 	ports=$(for d in "$RUN"/*/; do [ -f "$d/port" ] && cat "$d/port"; done | sort -u)
 	for d in "$RUN"/*/; do [ -d "$d" ] && teardown "$(basename "$d")"; done
 	for port in $ports; do
@@ -164,11 +246,45 @@ handle() {  # one bridge fdb line
 	line=$(fdb_learned "$1") || return 0
 	set -- $line
 	allowed "$1" || return 0
+	held "$1" && return 0
 	if [ -d "$RUN/$1" ]; then
 		[ "$(cat "$RUN/$1/port")" = "$2" ] && return 0
 		teardown "$1"
 	fi
 	setup "$1" "$2"
+}
+
+# A client the AP reports gone has roamed or slept: its station would otherwise
+# hold the client's MAC upstream, against the client's real association, until
+# the idle window ran out. Deleting the fdb entry stops the sweep re-adding it.
+handle_event() {  # one iw event line
+	ev=$(iw_event "$1") || return 0
+	set -- $ev
+	case "$1" in
+	arrive) rm -f "$RUN/holdoff/$3" ;;
+	leave)
+		[ -s "$RUN/$3/port" ] && [ "$(cat "$RUN/$3/port")" = "$2" ] || return 0
+		log "$3 left $2"
+		teardown "$3"
+		bridge fdb del "$3" dev "$2" master 2>/dev/null
+		holdoff "$3"
+		;;
+	kicked)
+		mac=$(mac_of_iface "$2") || return 0
+		read -r port < "$RUN/$mac/port"
+		log "$2 disconnected by the AP"
+		teardown "$mac"
+		bridge fdb del "$mac" dev "$port" master 2>/dev/null
+		holdoff "$mac"
+		;;
+	esac
+}
+
+dispatch() {
+	case "$1" in
+	*": new station "*|*": del station "*|*": disconnected "*) handle_event "$1" ;;
+	*) handle "$1" ;;
+	esac
 }
 
 # Presence: the bridge stops learning a redirected client, so the redirect's own
@@ -211,7 +327,8 @@ sweep() {
 			teardown "$(basename "$d")"
 		fi
 	done
-	bridge fdb show br br-lan | while read -r l; do handle "$l"; done
+	elect
+	bridge fdb show br "$BRIDGE" | while read -r l; do handle "$l"; done
 }
 
 # Serializes a concurrent setup/teardown between the monitor and sweep
@@ -227,16 +344,20 @@ monitor)
 	rm -f "$RUN/fifo"; mkfifo "$RUN/fifo"
 	bridge monitor fdb > "$RUN/fifo" &
 	MON=$!
-	trap 'kill $MON; exit' TERM INT
-	bridge fdb show br br-lan | while read -r l; do locked handle "$l"; done
-	while read -r l; do locked handle "$l"; done < "$RUN/fifo"
+	iw event > "$RUN/fifo" &
+	IWMON=$!
+	trap 'kill $MON $IWMON; exit' TERM INT
+	bridge fdb show br "$BRIDGE" | while read -r l; do locked handle "$l"; done
+	while read -r l; do locked dispatch "$l"; done < "$RUN/fifo"
 	;;
 sweep) mkdir -p "$RUN"; while sleep "$SWEEP"; do locked sweep; done ;;
 teardown-all) teardown_all ;;
 status)
+	f=$(forwarder)
 	for d in "$RUN"/*/; do
-		[ -d "$d" ] || continue
-		echo "$(basename "$d") $(cat "$d/iface") on $(cat "$d/port"), $(cat "$d/count") pkts, seen $(date -d @"$(cat "$d/seen")" 2>/dev/null || cat "$d/seen")"
+		[ -s "$d/iface" ] || continue
+		m=$(basename "$d")
+		echo "$m $(cat "$d/iface") on $(cat "$d/port"), $(cat "$d/count") pkts, seen $(date -d @"$(cat "$d/seen")" 2>/dev/null || cat "$d/seen")$([ "$m" = "$f" ] && echo ', forwards group frames')"
 	done
 	;;
 *) echo "usage: pstad monitor|sweep|teardown-all|status" >&2; exit 1 ;;

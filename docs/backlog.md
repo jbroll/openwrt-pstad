@@ -1,40 +1,24 @@
 # Backlog
 
-`*` in the allowlist is not yet safe on a repeater with many clients or
-clients that roam between the repeater and the upstream access point. The first
-three items below are what has to land before it is.
+## Capacity
 
-## Broadcast-forwarder election
+The phy's managed-interface limit (19 on MT7915, one taken by the backhaul)
+is not checked before setup. The 19th client's station fails at `ip link set
+up`, setup rolls back, and the client stays on the bridge with no upstream
+path at all, since relayd is gone. Read the limit from `iw phy` at start and
+either refuse the client with a log line or keep a small relayd-like fallback
+for overflow.
 
-With several proxy stations up, the access point hands its copy of every
-downstream broadcast to each of them, and each station's group-frame rule
-redirects it into the bridge, so one upstream broadcast arrives N times on the
-LAN side. Have `pstad` designate one live station to own the downstream
-group-frame rule (pref 4 on the station) and re-designate in the sweep when
-that client leaves.
+## The kicked path on hardware
 
-## Roam teardown
+`disconnected (by AP)` on a proxy station is handled by the same code as a
+client leaving, and covered by the unit tests, but has not been provoked on a
+device. It needs an upstream access point that deauthenticates the old
+association when the same MAC associates to another of its radios.
 
-A client that roams from the repeater to the upstream access point directly
-leaves its proxy station associated under the same MAC, fighting the client's
-real association for up to the idle window (`PSTA_IDLE`, 300 s). Add a
-`wpa_cli` action script that tears the station down on
-`CTRL-EVENT-DISCONNECTED` and holds the MAC off for a few minutes. Needs the
-`wpa-cli` package on the device.
+## Wired clients that unplug
 
-## tc pref collision
-
-`pref_for` derives the tc pref from the low 16 bits of the MAC (mod 65000,
-plus 100), so two clients whose last two octets match land on the same pref.
-On a shared port, `teardown` deletes by pref and takes the survivor's redirect
-with it, and nothing self-heals. Harmless with one or two clients; at 18 the
-chance of a collision is about 0.2%. Delete by filter handle, or allocate a
-free pref per client instead of hashing the MAC.
-
-## Key management
-
-`write_conf` hardcodes `key_mgmt=SAE WPA-PSK` with `ieee80211w=1`, which is
-right for a WPA2/WPA3 mixed upstream and is what an OpenWrt `sae-mixed`
-station uses. It is not derived from the backhaul's own `encryption` setting,
-so a `psk2`-only or SAE-only upstream needs a hand edit. Derive it from the
-`wifi-iface` the backhaul is read from.
+No event marks a wired client leaving, so its station stays up for the idle
+window. Harmless unless the same host reappears upstream within that window.
+`iw event` cannot help; a link-state watch on the port would only catch the
+whole port going down.
