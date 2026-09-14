@@ -1,0 +1,9 @@
+filter protocol all pref 48979 flower chain 0
+filter protocol all pref 48979 flower chain 0 handle 0x1
+  src_mac 02:00:00:00:be:ef
+  not_in_hw
+	action order 1: mirred (Egress Redirect to device psta-00beef) stolen
+ 	index 1 ref 1 bind 1 installed 120 sec used 3 sec
+	Action statistics:
+	Sent 4096 bytes 32 pkt (dropped 0, overlimits 0 requeues 0)
+	backlog 0b 0p requeues 0

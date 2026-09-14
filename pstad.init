@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+# Two instances so neither needs job control: the monitor reacts to bridge
+# events, the sweep ages clients out. START=99 so the backhaul exists first.
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance monitor
+	procd_set_param command /usr/sbin/pstad monitor
+	procd_set_param respawn
+	procd_close_instance
+	procd_open_instance sweep
+	procd_set_param command /usr/sbin/pstad sweep
+	procd_set_param respawn
+	procd_close_instance
+}
+
+# Runs after both instances are dead, so nothing re-adds a station.
+service_stopped() {
+	/usr/sbin/pstad teardown-all
+}
