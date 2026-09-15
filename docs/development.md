@@ -40,7 +40,8 @@ that, then redefines whichever functions or commands would touch the device
 their arguments or return canned output. Because the daemon calls these by bare
 name, a function shadows the real binary. `PROC` points at an empty temporary
 directory for the whole run, so nothing reads the host's own `/proc`; the
-`psta_supplicants` block fills it with fake `cmdline` files.
+`psta_supplicants` block fills it with fake `cmdline` files. `SYS` does the
+same for `/sys` in the blocks that need a port to look wireless.
 
 Each block sets up a temporary `RUN` directory, runs the function under test,
 and compares its output or the resulting files. Stubs are removed with

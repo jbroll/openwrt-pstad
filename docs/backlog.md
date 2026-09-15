@@ -9,16 +9,34 @@ path at all, since relayd is gone. Read the limit from `iw phy` at start and
 either refuse the client with a log line or keep a small relayd-like fallback
 for overflow.
 
-## The kicked path on hardware
+## Silent roams between repeaters
 
-A `del station` on a `psta-*` station tears the client down, and that event
-has been seen on a device only for a local deauthentication. An upstream
-deauthentication was not provoked. Two stations with one fabricated MAC, on
-two repeaters, both stayed associated to a Verizon Fios router, including after
-the older one sent traffic. The same router did send
-`Reason: 7=CLASS3_FRAME_FROM_NONASSOC_STA` to a phone's proxy stations on both
-repeaters fifteen times in one night, while hostapd on both listed the phone,
-so a collision is not always silent. What sets it off is not known.
+A client that roams from one repeater to another without deauthenticating
+from the first leaves the first repeater's hostapd listing it, so no
+`del station` arrives and its proxy station stays associated. The upstream
+router then holds two associations for one MAC and delivers to neither
+reliably. Measured with a test client moved from dc10 to cb26 by BSSID: cb26
+built its station within 2 s, and the client answered no ping for about 90 s,
+until hostapd on dc10 was told to drop it by hand. Left alone, only dc10's
+`PSTA_IDLE` of 300 s or hostapd's own inactivity timer would end it. A phone
+listed by both units' hostapd for 42 minutes overnight fits the same pattern.
+
+A likely signal needs no coordination between repeaters: the router
+rebroadcasts the client's group frames to every station, so the stale
+repeater's backhaul drop rule for the client keeps counting while its port-side
+redirect does not. A sweep, or a faster check, that sees that could tear the
+station down and remove the client from its own AP with `ubus call
+hostapd.<ap> del_client`.
+
+## Roams between repeaters cost a deauthentication
+
+When a client moves from one repeater to another, the new repeater's station
+is usually up before the old one's `PSTA_LEAVE_WAIT` ends, and the old
+teardown's deauthentication makes the router drop the new station too. The
+supplicant recovers in about 0.35 s, but the client loses that much. The old
+station cannot leave without deauthenticating, since mac80211 sends one on
+interface removal. Coordinating the two repeaters, or shortening the wait with
+sub-second polls, would narrow it.
 
 ## Orphan lines after an idle teardown
 

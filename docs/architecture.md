@@ -226,7 +226,7 @@ of its upstream access point:
 | event | action |
 |---|---|
 | `<port>: del station <mac>` for a proxied client on that port | unless the client is back on the AP within `PSTA_LEAVE_WAIT`, tear it down, delete its fdb entry on that port, and hold the MAC off |
-| `psta-xxxxxx: del station <bssid>` | tear that client down and delete its fdb entry, with no hold-off, unless stamped no later than the second its setup began |
+| `psta-xxxxxx: del station <bssid>` | leave the station to reconnect if its client is still here; otherwise tear the client down and delete its fdb entry, with no hold-off. Ignored if stamped no later than the second its setup began |
 | `<port>: new station <mac>` | clear any hold-off on the MAC |
 
 A client re-associating to the same access point is not leaving, but hostapd
@@ -248,11 +248,24 @@ the lock is released, when a setup may already have rebuilt a station under
 the same name. Each client directory records the second its setup began in
 `since`, and an event stamped no later than that is ignored.
 
-A dropped proxy station gets no hold-off. If the client is still associated
-here and sending, its next frame is learned by the bridge and the station is
-rebuilt. If it has moved to another access point, nothing arrives and the
-station stays down, which ends the collision instead of leaving the
-supplicant to associate again and push the client's real association aside.
+A drop is what a roam between two repeaters looks like on the new side.
+Observed on a Verizon Fios router with a test client moving from one WR1800K
+to the other: the new repeater's station associated at 14:57:45, the old
+repeater's leave wait ended and its teardown deauthenticated the client's MAC
+at 14:57:47, and at 14:57:49.5 the router deauthenticated the new station with
+`Reason: 7=CLASS3_FRAME_FROM_NONASSOC_STA`. The router keys associations by
+MAC, so the old station's deauthentication ended the new one's too. The new
+station's supplicant had associated again 0.35 s later, and tearing it down at
+that point stretched the gap to 2.5 s.
+
+So a dropped station is kept, and left to its supplicant, while its client is
+still here: on a wired port, or on an AP port whose `iw dev <port> station get`
+reports an `inactive time` under `PSTA_RECENT` seconds (10 by default). A
+station whose client has gone quiet is the stale side of a collision. It is
+torn down with no hold-off: nothing arrives from a client that has moved, so
+the station stays down instead of associating again and pushing the client's
+real association aside, and a client that comes back is rebuilt by its next
+frame.
 
 The fdb deletion matters because the sweep re-reads `bridge fdb show` and
 would otherwise re-proxy the client from its stale entry. The hold-off,
@@ -268,9 +281,10 @@ the monitor reads it through the same FIFO as `bridge monitor fdb`.
 
 Whether the upstream access point ever drops a proxy station depends on the
 router. A Verizon Fios unit usually keeps both associations when the same MAC
-associates twice and delivers to the newer one, so a client roaming from the
-repeater to the router simply wins, and the repeater's own `del station` for
-the client is what tears its station down. The same router has also
+associates twice, and the repeater's own `del station` for the client is what
+tears the old station down. Until then delivery is unreliable: a client that
+roamed silently between two repeaters answered nothing for about 90 s, until
+the old station was removed. See [backlog.md](backlog.md). The same router has also
 deauthenticated a phone's proxy stations with reason 7, for sending data while
 it considered them unassociated. See [backlog.md](backlog.md).
 

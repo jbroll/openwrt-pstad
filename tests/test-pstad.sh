@@ -159,18 +159,38 @@ rm -rf "$RUN/$mac"
 unset -f iw sleep
 
 # handle_event: a proxy station whose AP deleted it is torn down by its iface
-# name, with no hold-off, unless the event predates the station's setup
-mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
-echo $(( ts - 5 )) > "$RUN/$mac/since"
-check "event kicked" "teardown $mac
-bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "$ts.419077: psta-00beef: del station 02:00:00:00:00:20")"
+# name, with no hold-off, once its wireless client has gone quiet here
+SYS=$(mktemp -d); mkdir -p "$SYS/class/net/phy0-ap0/phy80211"
+RECENT=10
+log() { :; }
+kicked_client() {  # PORT SINCE
+	mkdir -p "$RUN/$mac"; echo "$1" > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
+	echo "$2" > "$RUN/$mac/since"
+}
+kick="$ts.419077: psta-00beef: del station 02:00:00:00:00:20"
+kicked_client phy0-ap0 $(( ts - 5 ))
+iw() { printf 'Station %s (on phy0-ap0)\n\tinactive time:\t25000 ms\n' "$mac"; }
+check "event kicked quiet client" "teardown $mac
+bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "$kick")"
 held "$mac"; check "event kicked holds nothing off" 1 $?
+kicked_client phy0-ap0 $(( ts - 5 ))
+iw() { return 254; }
+check "event kicked client gone from the AP" "teardown $mac
+bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "$kick")"
+kicked_client phy0-ap0 $(( ts - 5 ))
+iw() { printf 'Station %s (on phy0-ap0)\n\tinactive time:\t1200 ms\n' "$mac"; }
+check "event kicked active client reconnects" "" "$(handle_event "$kick")"
+[ -d "$RUN/$mac" ]; check "event kicked active client keeps the client" 0 $?
+kicked_client lan3 $(( ts - 5 ))
+iw() { return 254; }
+check "event kicked wired client reconnects" "" "$(handle_event "$kick")"
 check "event kicked unknown iface" "" "$(handle_event "$ts.419077: psta-00cafe: del station 02:00:00:00:00:20")"
-mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
-echo "$ts" > "$RUN/$mac/since"
-check "event kicked from before setup" "" "$(handle_event "$ts.419077: psta-00beef: del station 02:00:00:00:00:20")"
+kicked_client phy0-ap0 "$ts"
+check "event kicked from before setup" "" "$(handle_event "$kick")"
 [ -d "$RUN/$mac" ]; check "event kicked from before setup keeps the client" 0 $?
-rm -rf "$RUN/$mac" "$RUN/holdoff"
+rm -rf "$RUN/$mac" "$RUN/holdoff" "$SYS"
+SYS=/sys
+unset -f iw log kicked_client
 
 # dispatch routes iw lines to handle_event and fdb lines to handle
 handle()       { echo "handle $1"; }

@@ -23,11 +23,14 @@ From `iw event`:
   seconds. A client back on the AP in that time has re-associated and keeps its
   station. Otherwise it is torn down, its fdb entry deleted and the MAC held off
   for `PSTA_HOLDOFF` seconds.
-- a `del station` on a `psta-*` station means the upstream AP dropped it. The
-  client is torn down and its fdb entry deleted, with no hold-off, so a client
-  still sending on this repeater is rebuilt by its next frame. An event stamped
-  no later than the second the station's setup began is ignored, since it
-  belongs to the teardown of an earlier station with the same name.
+- a `del station` on a `psta-*` station means the upstream AP dropped it. If
+  the client is on a wired port, or its AP port reports an `inactive time`
+  under `PSTA_RECENT` seconds, the station is left for its supplicant to
+  associate again. Otherwise the client is torn down and its fdb entry deleted,
+  with no hold-off, so a client that comes back is rebuilt by its next frame.
+  An event stamped no later than the second the station's setup began is
+  ignored, since it belongs to the teardown of an earlier station with the same
+  name.
 - a `new station` clears the hold-off.
 
 Exits on TERM or INT after killing both children.
@@ -92,6 +95,7 @@ command line for a manual run.
 | `PSTA_DOWN_GRACE` | `120` | Seconds a station may read not connected before it is torn down |
 | `PSTA_HOLDOFF` | `60` | Seconds a client torn down for leaving is ignored if re-learned from stale frames; cleared early when the AP reports it back |
 | `PSTA_LEAVE_WAIT` | `3` | Seconds a client the AP reported gone may take to reappear on the AP before it is torn down; covers a re-association, which deletes and re-adds the station. The monitor handles no other event meanwhile |
+| `PSTA_RECENT` | `10` | Seconds within which a wireless client must have been heard on its AP port for its dropped proxy station to be left to reconnect rather than torn down |
 
 ## The allowlist
 
@@ -181,6 +185,7 @@ Messages:
 | `setup failed for <mac> on <port>` | Some step of setup failed; see the preceding line |
 | `<iface> lost association` | The station read not connected for the whole grace period |
 | `<mac> left <port>` | The repeater's AP reported the client gone and it did not reappear within `PSTA_LEAVE_WAIT`; torn down and held off |
-| `<iface> dropped by the AP` | The upstream AP deleted the proxy station; torn down with no hold-off |
+| `<iface> dropped by the AP, client still here` | The upstream AP deleted the proxy station while its client is wired or recently heard; left for the supplicant to reconnect |
+| `<iface> dropped by the AP, client gone` | The upstream AP deleted the proxy station and its client has gone quiet; torn down with no hold-off |
 | `<iface> forwards group frames` | That station now carries the single group-frame rule |
 | `backhaul now on <bssid>, dropping every station` | The backhaul moved; all stations rebuilt against the new BSSID |

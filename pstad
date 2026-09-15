@@ -13,7 +13,9 @@ ASSOC=${PSTA_ASSOC:-20}
 DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
 HOLDOFF=${PSTA_HOLDOFF:-60}
 LEAVE_WAIT=${PSTA_LEAVE_WAIT:-3}
+RECENT=${PSTA_RECENT:-10}
 PROC=${PROC:-/proc}
+SYS=${SYS:-/sys}
 KILL_WAIT=3
 
 log() { logger -t pstad "$*"; }
@@ -345,6 +347,15 @@ handle() {  # one bridge fdb line
 	setup "$1" "$2"
 }
 
+# A wired client cannot have roamed; a wireless one is here while its AP heard
+# from it within RECENT seconds.
+client_here() {  # PORT MAC
+	[ -e "$SYS/class/net/$1/phy80211" ] || return 0
+	idle=$(iw dev "$1" station get "$2" 2>/dev/null |
+		sed -n 's/^[[:space:]]*inactive time:[[:space:]]*\([0-9]*\) ms.*/\1/p')
+	[ -n "$idle" ] && [ "$idle" -lt $(( RECENT * 1000 )) ]
+}
+
 # A client the AP reports gone has roamed or slept: its station would otherwise
 # hold the client's MAC upstream, against the client's real association, until
 # the idle window ran out. Deleting the fdb entry stops the sweep re-adding it.
@@ -368,10 +379,16 @@ handle_event() {  # one iw event line
 		since=$(cat "$RUN/$mac/since" 2>/dev/null)
 		[ "$3" -gt "${since:-0}" ] || return 0
 		read -r port < "$RUN/$mac/port"
-		log "$2 dropped by the AP"
+		# The upstream AP drops this station whenever another repeater's
+		# station for the same MAC deauthenticates, as a roam between repeaters
+		# does; its supplicant associates again within a second.
+		if client_here "$port" "$mac"; then
+			log "$2 dropped by the AP, client still here"
+			return 0
+		fi
+		log "$2 dropped by the AP, client gone"
 		teardown "$mac"
-		# No hold-off: a client still here is rebuilt by its next frame, and one
-		# that has gone sends none.
+		# No hold-off: a client that comes back is rebuilt by its next frame.
 		bridge fdb del "$mac" dev "$port" master 2>/dev/null
 		;;
 	esac
