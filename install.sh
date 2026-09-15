@@ -5,6 +5,7 @@ host=${1:?usage: install.sh <repeater-host>}
 dir=$(dirname "$0")
 
 ssh "root@$host" 'opkg list-installed | grep -q "^tc-full " || { opkg update && opkg install tc-full kmod-sched-core kmod-sched-flower ip-bridge; }'
+ssh "root@$host" 'command -v tcpdump >/dev/null || { opkg update && opkg install tcpdump-mini; }'
 # The redirect is the whole mechanism; stop here if the kernel cannot do it.
 ssh "root@$host" 'modprobe act_mirred; modprobe cls_flower; lsmod | grep -q "^act_mirred" && lsmod | grep -q "^cls_flower" && echo "mirred and flower loaded"'
 

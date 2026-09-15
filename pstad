@@ -14,6 +14,8 @@ DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
 HOLDOFF=${PSTA_HOLDOFF:-60}
 LEAVE_WAIT=${PSTA_LEAVE_WAIT:-3}
 RECENT=${PSTA_RECENT:-10}
+MONIF=${PSTA_MONIF:-pstamon}
+JOIN_DELAY=${PSTA_JOIN_DELAY:-1}
 PROC=${PROC:-/proc}
 SYS=${SYS:-/sys}
 KILL_WAIT=3
@@ -363,7 +365,13 @@ handle_event() {  # one iw event line
 	ev=$(iw_event "$1") || return 0
 	set -- $ev
 	case "$1" in
-	arrive) rm -f "$RUN/holdoff/$3" ;;
+	arrive)
+		rm -f "$RUN/holdoff/$3"
+		# A client that has just associated may send nothing for seconds, as
+		# traffic for it still goes to its old station, so the bridge would not
+		# learn it; the association itself is enough to start its station.
+		[ -e "$SYS/class/net/$2/brport" ] && handle "$3 dev $2 master $BRIDGE"
+		;;
 	leave)
 		[ -s "$RUN/$3/port" ] && [ "$(cat "$RUN/$3/port")" = "$2" ] || return 0
 		returned "$2" "$3" && return 0
@@ -394,9 +402,66 @@ handle_event() {  # one iw event line
 	esac
 }
 
+# One monitor line -> "MAC BSSID" for a station joining a BSS on the backhaul
+# channel. Frames this radio sent carry no received signal, so the repeater's
+# own stations never match. The SSID follows SA: and is sender-controlled, so
+# only the first of each field counts.
+air_join() {
+	case "$1" in *"dBm signal "*) ;; *) return 1 ;; esac
+	case "$1" in *" Authentication ("*|*" Assoc Request "*|*" ReAssoc Request "*) ;; *) return 1 ;; esac
+	set -f
+	b= da= sa=
+	for w in $1; do
+		case "$w" in
+		BSSID:*) [ -n "$b" ] || b=${w#BSSID:} ;;
+		DA:*) [ -n "$da" ] || da=${w#DA:} ;;
+		SA:*) [ -n "$sa" ] || sa=${w#SA:} ;;
+		esac
+	done
+	[ -n "$sa" ] && [ -n "$b" ] && [ "$da" = "$b" ] || return 1
+	printf '%s %s\n' "$sa" "$b"
+}
+
+# A client joining the upstream BSS through anything but this repeater, the
+# other repeater's proxy station or the router's own radio, has left here even
+# if this AP was never told. Two associations for one MAC in one BSS deliver to
+# neither, so this station goes, but JOIN_DELAY later: its deauthentication
+# makes the router drop the MAC, and landing inside the new association's 4-way
+# handshake stalls that for the supplicant's 10 s timeout.
+handle_air() {  # one monitor line
+	j=$(air_join "$1") || return 0
+	set -- $j
+	[ "$2" = "$(cat "$RUN/bssid" 2>/dev/null)" ] || return 0
+	[ -s "$RUN/$1/port" ] || return 0
+	read -r port < "$RUN/$1/port"
+	[ -e "$SYS/class/net/$port/phy80211" ] || return 0
+	# Authentication and association request both match; one teardown is enough.
+	[ -f "$RUN/$1/leaving" ] && return 0
+	: > "$RUN/$1/leaving"
+	log "$1 joining $2 elsewhere, dropping its station"
+	defer "$JOIN_DELAY" left_elsewhere "$1" "$(date +%s)"
+}
+
+# Runs a command after SECONDS, under the lock, without holding up the caller.
+defer() {  # SECONDS CMD...
+	( d=$1; shift; sleep "$d"; locked "$@" ) 9>&- >/dev/null 2>&1 &
+}
+
+left_elsewhere() {  # MAC HEARD
+	[ -s "$RUN/$1/port" ] || return 0
+	since=$(cat "$RUN/$1/since" 2>/dev/null)
+	[ "${since:-0}" -le "$2" ] || return 0
+	read -r port < "$RUN/$1/port"
+	teardown "$1"
+	bridge fdb del "$1" dev "$port" master 2>/dev/null
+	ubus call "hostapd.$port" del_client "{\"addr\":\"$1\",\"reason\":3,\"deauth\":false,\"ban_time\":0}" >/dev/null 2>&1
+	holdoff "$1"
+}
+
 dispatch() {
 	case "$1" in
 	*": new station "*|*": del station "*) handle_event "$1" ;;
+	*" BSSID:"*) handle_air "$1" ;;
 	*) handle "$1" ;;
 	esac
 }
@@ -458,6 +523,19 @@ sweep() {
 	bridge fdb show br "$BRIDGE" | while read -r l; do handle "$l"; done
 }
 
+# A monitor interface on the backhaul phy hears every station joining the
+# upstream BSS on that channel. Rebuilt if a wifi reload removes it.
+air_watch() {
+	while :; do
+		iw dev "$MONIF" del 2>/dev/null
+		iw phy "$(phy_of "$(backhaul)")" interface add "$MONIF" type monitor 2>/dev/null &&
+			ip link set "$MONIF" up &&
+			tcpdump -i "$MONIF" -y IEEE802_11_RADIO -l -e -n -tt \
+				'type mgt and (subtype auth or subtype assoc-req or subtype reassoc-req)' 2>/dev/null
+		sleep 5
+	done
+}
+
 # Serializes a concurrent setup/teardown between the monitor and sweep
 # instances; handle/sweep never lock themselves so tests can call them direct.
 locked() { ( flock 9; "$@" ) 9>"$RUN/lock"; }
@@ -473,7 +551,13 @@ monitor)
 	MON=$!
 	iw event -t > "$RUN/fifo" &
 	IWMON=$!
-	trap 'kill $MON $IWMON; exit' TERM INT
+	if command -v tcpdump >/dev/null; then
+		air_watch > "$RUN/fifo" &
+		AIR=$!
+	else
+		log "no tcpdump, clients joining the upstream BSS elsewhere go unseen"
+	fi
+	trap 'kill $MON $IWMON $AIR; iw dev "$MONIF" del 2>/dev/null; exit' TERM INT
 	bridge fdb show br "$BRIDGE" | while read -r l; do locked handle "$l"; done
 	while read -r l; do locked dispatch "$l"; done < "$RUN/fifo"
 	;;

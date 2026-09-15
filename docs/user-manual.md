@@ -31,9 +31,21 @@ From `iw event`:
   An event stamped no later than the second the station's setup began is
   ignored, since it belongs to the teardown of an earlier station with the same
   name.
-- a `new station` clears the hold-off.
+- a `new station` clears the hold-off, and on a bridge port is handled like a
+  learned fdb entry for that MAC on that port, so setup starts at association
+  rather than at the client's first frame.
 
-Exits on TERM or INT after killing both children.
+It also adds a monitor interface named by `PSTA_MONIF` to the backhaul phy and
+reads `tcpdump` on it, filtered to authentication and association requests. A
+received request to the backhaul's BSSID from a client proxied here on a
+wireless port means the client is joining that BSS through another radio. The
+client is torn down, its fdb entry deleted, it is removed from this repeater's
+AP with `ubus call hostapd.<port> del_client`, and its MAC is held off. The
+interface is recreated every 5 s while missing. Without `tcpdump` this is
+skipped with a log line.
+
+Exits on TERM or INT after killing its children and deleting the monitor
+interface.
 
 ### `pstad sweep`
 
@@ -86,7 +98,7 @@ command line for a manual run.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `count`, `seen`, `since` (when setup began) and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
+| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `count`, `seen`, `since` (when setup began), `leaving` (a teardown for joining elsewhere is pending) and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
 | `ALLOW` | `/etc/psta/allow` | Allowlist path |
 | `PSTA_BRIDGE` | `br-lan` | The LAN bridge whose ports carry clients; group frames are redirected into it |
 | `PSTA_IDLE` | `300` | Seconds without the redirect counter rising before a client is torn down |
@@ -95,6 +107,8 @@ command line for a manual run.
 | `PSTA_DOWN_GRACE` | `120` | Seconds a station may read not connected before it is torn down |
 | `PSTA_HOLDOFF` | `60` | Seconds a client torn down for leaving is ignored if re-learned from stale frames; cleared early when the AP reports it back |
 | `PSTA_LEAVE_WAIT` | `3` | Seconds a client the AP reported gone may take to reappear on the AP before it is torn down; covers a re-association, which deletes and re-adds the station. The monitor handles no other event meanwhile |
+| `PSTA_JOIN_DELAY` | `1` | Seconds between hearing a client join the upstream BSS elsewhere and tearing its station down, so the teardown's deauthentication lands after the new association's 4-way handshake |
+| `PSTA_MONIF` | `pstamon` | Name of the monitor interface added to the backhaul phy to hear clients joining the upstream BSS elsewhere |
 | `PSTA_RECENT` | `10` | Seconds within which a wireless client must have been heard on its AP port for its dropped proxy station to be left to reconnect rather than torn down |
 
 ## The allowlist
@@ -124,7 +138,7 @@ sh install.sh <repeater-host>
 Connects as `root@<repeater-host>` over SSH and:
 
 1. installs `tc-full kmod-sched-core kmod-sched-flower ip-bridge` if
-   `tc-full` is not already installed;
+   `tc-full` is not already installed, and `tcpdump-mini` if no `tcpdump` is;
 2. loads `act_mirred` and `cls_flower` and confirms both are present, since the
    redirect is the whole forwarding mechanism;
 3. copies `pstad` to `/usr/sbin/pstad` and `pstad.init` to
@@ -187,5 +201,7 @@ Messages:
 | `<mac> left <port>` | The repeater's AP reported the client gone and it did not reappear within `PSTA_LEAVE_WAIT`; torn down and held off |
 | `<iface> dropped by the AP, client still here` | The upstream AP deleted the proxy station while its client is wired or recently heard; left for the supplicant to reconnect |
 | `<iface> dropped by the AP, client gone` | The upstream AP deleted the proxy station and its client has gone quiet; torn down with no hold-off |
+| `<mac> joining <bssid> elsewhere, dropping its station` | The client was heard associating to the backhaul's BSS through another radio; torn down, removed from this AP and held off |
+| `no tcpdump, clients joining the upstream BSS elsewhere go unseen` | `tcpdump` is not installed, so the monitor interface is not used |
 | `<iface> forwards group frames` | That station now carries the single group-frame rule |
 | `backhaul now on <bssid>, dropping every station` | The backhaul moved; all stations rebuilt against the new BSSID |

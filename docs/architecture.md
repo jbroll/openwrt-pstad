@@ -288,6 +288,61 @@ the old station was removed. See [backlog.md](backlog.md). The same router has a
 deauthenticated a phone's proxy stations with reason 7, for sending data while
 it considered them unassociated. See [backlog.md](backlog.md).
 
+### Clients that join elsewhere
+
+A client can leave without its AP noticing. Moved from one repeater to another
+by BSSID, a test client sent the first repeater nothing, so hostapd there kept
+listing it and no `del station` came. Both proxy stations now held the client's
+MAC in the router's one 5 GHz BSS, and the router delivered to neither: the
+client answered no ping from 21 s after the move until the old repeater's
+hostapd dropped it for inactivity five minutes later. hostapd's old IAPP
+support, which had APs announce new stations to each other, was removed in
+hostapd 2.10.
+
+Every association that causes this happens on the backhaul's own channel,
+since it is a second association to the backhaul's BSS. So the monitor also
+runs `tcpdump` on a monitor interface, `pstamon`, added to the backhaul phy,
+filtered to authentication and association requests. The interface follows
+the phy's channel and needs no slot in its interface combination. A line from
+it names a client of this repeater when:
+
+- it carries a received signal. Frames this radio sent itself, including this
+  repeater's own proxy stations associating, appear with TX flags and no
+  signal;
+- its DA is its BSSID, so it is from a station to the AP, not the AP's reply;
+- its BSSID is the backhaul's;
+- its SA is a client proxied here on a wireless port.
+
+`PSTA_JOIN_DELAY` seconds later (1 by default), unless its station has been
+rebuilt since, such a client is torn down, its fdb entry deleted, it is removed
+from this repeater's AP with `ubus call hostapd.<port> del_client`, and its MAC
+is held off. The wait runs in the background and takes the lock itself.
+
+The wait is there because the teardown's deauthentication, sent under the
+client's MAC, makes the router drop that MAC's association, including the new
+one. Captured from a monitor during a roam, the new station authenticated at
+627.577, associated at 627.592 and finished its 4-way handshake by 627.628.
+The old repeater's deauthentication followed about 370 ms after the
+authentication, the router dropped the new station with reason 7, and it was
+associated again 0.45 s later. In an earlier roam the deauthentication evidently
+landed inside the handshake: the new station was never dropped, and it gave up
+after `wpa_supplicant`'s 10 s handshake timeout. A second is far past the 50 ms
+handshake, which leaves the single reason-7 reconnect. A `new station` for it clears the hold-off if it comes back. Only the
+first `BSSID:`, `DA:` and `SA:` in a line count, because the SSID printed after
+them is chosen by the sender.
+
+Measured on a WR1800K beside its live backhaul and eight proxy stations, a test
+station on the other repeater associating to the Fios appeared within
+milliseconds at -62 dBm, and `tcpdump` did not register in `top`.
+
+The first live roam with it, a test client moved silently from dc10 to cb26,
+showed where the rest of the gap was. dc10 dropped its station in the second
+cb26's station authenticated. But cb26 began that station four seconds after
+the client associated, because setup waited for the bridge to learn the
+client and the client sent nothing while its traffic still went to dc10. A
+`new station` on a bridge port therefore starts setup directly. Joins on the
+router's other radios are not heard; see [backlog.md](backlog.md).
+
 The `clsact` qdisc on the port and on the backhaul is added with errors
 ignored, since it may already exist from an earlier client; on the client's
 own station it is always fresh.

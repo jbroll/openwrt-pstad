@@ -142,6 +142,17 @@ check "event arrive clears"    "" "$(handle_event "phy0-ap0 (phy #0): new statio
 held "$mac"; check "event arrive cleared holdoff" 1 $?
 rm -rf "$RUN/$mac"
 
+# handle_event: a new station on a bridge port starts its client's setup at
+# once; one on the backhaul, for the upstream AP, does not
+SYS=$(mktemp -d); mkdir -p "$SYS/class/net/phy0-ap0/brport" "$SYS/class/net/phy1-sta0"
+BRIDGE=br-lan
+check "event arrive sets up" "setup $mac phy0-ap0" "$(handle_event "$ts.095142: phy0-ap0: new station $mac")"
+check "event arrive on the backhaul" "" "$(handle_event "$ts.579477: phy1-sta0: new station 02:00:00:00:00:20")"
+mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"
+check "event arrive of a proxied client" "" "$(handle_event "$ts.099113: phy0-ap0: new station $mac")"
+rm -rf "$RUN/$mac" "$SYS"
+SYS=/sys
+
 # handle_event: a reassociation deletes and re-adds the AP's station, and the
 # client keeps its upstream station
 mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
@@ -192,11 +203,57 @@ rm -rf "$RUN/$mac" "$RUN/holdoff" "$SYS"
 SYS=/sys
 unset -f iw log kicked_client
 
-# dispatch routes iw lines to handle_event and fdb lines to handle
+# air_join: received auth and association requests from a station to its AP
+bss=02:00:00:00:00:20
+rx="$ts.895099 2297348354us tsft 6.0 Mb/s 5260 MHz 11a -62dBm signal [bit 22]"
+check "air assoc"    "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (lucky7) [6.0 9.0 Mbit]" )"
+check "air reassoc"  "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac ReAssoc Request (lucky7) [6.0 9.0 Mbit]" )"
+check "air auth"     "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Authentication (Open System)-1: Successful" )"
+check "air auth reply from the AP" "" "$( air_join "$rx BSSID:$bss DA:$mac SA:$bss Authentication (Open System)-2: " )"
+check "air own transmission" "" "$( air_join "$ts.771967 [bit 15] BSSID:$bss DA:$bss SA:$mac Authentication (Open System)-1: Successful" )"
+check "air deauth"   "" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac DeAuthentication: Deauthenticated because sending STA is leaving" )"
+check "air ssid cannot name a MAC" "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (x SA:$mac2 DA:$bss) [6.0 Mbit]" )"
+
+# handle_air: a proxied wireless client heard joining the backhaul BSS elsewhere
+# is torn down, removed from this AP and held off
+SYS=$(mktemp -d); mkdir -p "$SYS/class/net/phy0-ap0/phy80211"
+echo "$bss" > "$RUN/bssid"
+bridge() { echo "bridge $*"; }
+ubus() { echo "ubus $1 $2 $3" >> "$SYS/ubus"; }
+log() { :; }
+join="$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (lucky7) [6.0 Mbit]"
+JOIN_DELAY=1
+defer() { echo "defer $*"; }
+mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"
+now=$(date +%s)
+check "air join elsewhere defers" "defer 1 left_elsewhere $mac $now" "$(handle_air "$join")"
+check "air join defers once" "" "$(handle_air "$join")"
+echo $(( now - 5 )) > "$RUN/$mac/since"
+check "left elsewhere" "teardown $mac
+bridge fdb del $mac dev phy0-ap0 master" "$(left_elsewhere "$mac" "$now")"
+check "left elsewhere removes the client from this AP" "ubus call hostapd.phy0-ap0 del_client" "$(cat "$SYS/ubus")"
+held "$mac"; check "left elsewhere holds off" 0 $?
+rm -rf "$RUN/holdoff"
+mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo $(( now + 1 )) > "$RUN/$mac/since"
+check "left elsewhere keeps a station rebuilt since" "" "$(left_elsewhere "$mac" "$now")"
+[ -d "$RUN/$mac" ]; check "left elsewhere keeps the rebuilt client" 0 $?
+rm -f "$RUN/$mac/since"
+check "air join other BSS" "" "$(handle_air "$rx BSSID:02:00:00:00:00:21 DA:02:00:00:00:00:21 SA:$mac Assoc Request (x) [6.0 Mbit]")"
+check "air join unknown client" "" "$(handle_air "$rx BSSID:$bss DA:$bss SA:$mac2 Assoc Request (x) [6.0 Mbit]")"
+echo lan3 > "$RUN/$mac/port"
+check "air join wired client" "" "$(handle_air "$join")"
+rm -rf "$RUN/$mac" "$RUN/bssid" "$SYS"
+SYS=/sys
+unset -f ubus log
+
+# dispatch routes iw lines to handle_event, monitor lines to handle_air and fdb
+# lines to handle
 handle()       { echo "handle $1"; }
 handle_event() { echo "event $1"; }
+handle_air()   { echo "air"; }
 check "dispatch fdb"  "handle $mac dev lan1 master br-lan" "$(dispatch "$mac dev lan1 master br-lan")"
 check "dispatch iw"   "event $ts.097179: phy0-ap0: del station $mac" "$(dispatch "$ts.097179: phy0-ap0: del station $mac")"
+check "dispatch air"  "air" "$(dispatch "$join")"
 PSTAD_LIB=1 . ./pstad
 setup()    { echo "setup $*"; }
 teardown() { echo "teardown $1"; rm -rf "$RUN/$1"; }

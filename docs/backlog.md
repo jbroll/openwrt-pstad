@@ -9,34 +9,26 @@ path at all, since relayd is gone. Read the limit from `iw phy` at start and
 either refuse the client with a log line or keep a small relayd-like fallback
 for overflow.
 
-## Silent roams between repeaters
+## Joins on other upstream channels
 
-A client that roams from one repeater to another without deauthenticating
-from the first leaves the first repeater's hostapd listing it, so no
-`del station` arrives and its proxy station stays associated. The upstream
-router then holds two associations for one MAC and delivers to neither
-reliably. Measured with a test client moved from dc10 to cb26 by BSSID: cb26
-built its station within 2 s, and the client answered no ping for about 90 s,
-until hostapd on dc10 was told to drop it by hand. Left alone, only dc10's
-`PSTA_IDLE` of 300 s or hostapd's own inactivity timer would end it. A phone
-listed by both units' hostapd for 42 minutes overnight fits the same pattern.
-
-A likely signal needs no coordination between repeaters: the router
-rebroadcasts the client's group frames to every station, so the stale
-repeater's backhaul drop rule for the client keeps counting while its port-side
-redirect does not. A sweep, or a faster check, that sees that could tear the
-station down and remove the client from its own AP with `ubus call
-hostapd.<ap> del_client`.
+The monitor interface hears only the backhaul's channel. A client leaving a
+repeater silently for another radio of the upstream router, a Verizon Fios
+unit's 2.4 GHz or second 5 GHz radio, raises nothing, and the repeater's
+station stays until hostapd's inactivity poll or `PSTA_IDLE`. Measured with a
+test client moved silently to the Fios 2.4 GHz radio, that stale station cost
+nothing: one ping lost at the move, none over the 5.5 minutes before it went,
+and none when its teardown deauthenticated the MAC. The router keeps a
+separate association per radio.
 
 ## Roams between repeaters cost a deauthentication
 
-When a client moves from one repeater to another, the new repeater's station
-is usually up before the old one's `PSTA_LEAVE_WAIT` ends, and the old
-teardown's deauthentication makes the router drop the new station too. The
-supplicant recovers in about 0.35 s, but the client loses that much. The old
-station cannot leave without deauthenticating, since mac80211 sends one on
-interface removal. Coordinating the two repeaters, or shortening the wait with
-sub-second polls, would narrow it.
+When a client moves from one repeater to another, the old repeater's teardown
+deauthenticates the client's MAC and the router drops the new station too. With
+`PSTA_JOIN_DELAY` placing that after the new 4-way handshake, the new station
+reassociates in about 0.4 s, and a test client roaming between the units lost
+four pings at 0.5 s intervals in all. The old station cannot leave without
+deauthenticating, since mac80211 sends one on interface removal. A way to drop
+the station without transmitting would remove that second gap.
 
 ## Orphan lines after an idle teardown
 
