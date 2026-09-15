@@ -31,8 +31,9 @@ sh install.sh repeater.local
 ```
 
 The `tc` flower redirect is the whole forwarding path, so the repeater needs
-`tc-full kmod-sched-core kmod-sched-flower ip-bridge`; `install.sh` adds them.
-relayd must not run alongside it.
+`tc-full kmod-sched-core kmod-sched-flower ip-bridge`, and `tcpdump-mini` to
+hear clients joining the upstream network through another radio; `install.sh`
+adds them. relayd must not run alongside it.
 
 - [docs/quickstart.md](docs/quickstart.md): from a relayd repeater to one
   proxied client.

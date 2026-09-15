@@ -14,8 +14,10 @@ From a working relayd-style repeater to one client with its own MAC upstream.
   `iw phy` lists this under "valid interface combinations"; mt76 on MT7915
   advertises `#{ managed } <= 19`. See
   [architecture.md](architecture.md) for the measurement.
-- Packages `tc-full kmod-sched-core kmod-sched-flower ip-bridge`.
-  `install.sh` installs them if `tc-full` is missing.
+- Packages `tc-full kmod-sched-core kmod-sched-flower ip-bridge`, and
+  `tcpdump-mini` for the monitor interface that hears clients roaming away.
+  `install.sh` installs the first set if `tc-full` is missing and
+  `tcpdump-mini` if no `tcpdump` is present.
 - SSH access as root from the machine you install from.
 - relayd removed. It re-issues each host's ARP under the station's own MAC and
   gives the upstream a second delivery path for every proxied host; measured at

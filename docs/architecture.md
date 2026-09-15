@@ -335,11 +335,12 @@ Measured on a WR1800K beside its live backhaul and eight proxy stations, a test
 station on the other repeater associating to the Fios appeared within
 milliseconds at -62 dBm, and `tcpdump` did not register in `top`.
 
-The first live roam with it, a test client moved silently from dc10 to cb26,
-showed where the rest of the gap was. dc10 dropped its station in the second
-cb26's station authenticated. But cb26 began that station four seconds after
-the client associated, because setup waited for the bridge to learn the
-client and the client sent nothing while its traffic still went to dc10. A
+The first live roam with it, a test client moved silently from one repeater to
+the other, showed where the rest of the gap was. The old repeater dropped its
+station in the second the new repeater's station authenticated. But the new
+repeater began that station four seconds after the client associated, because
+setup waited for the bridge to learn the client and the client sent nothing
+while its traffic still went to the old repeater. A
 `new station` on a bridge port therefore starts setup directly. Joins on the
 router's other radios are not heard; see [backlog.md](backlog.md).
 

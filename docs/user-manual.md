@@ -164,7 +164,7 @@ files/etc/psta/allow          (optional; a lone * proxies all clients)
 
 ```sh
 make image PROFILE=<profile> FILES=files/ \
-  PACKAGES="tc-full kmod-sched-core kmod-sched-flower ip-bridge"
+  PACKAGES="tc-full kmod-sched-core kmod-sched-flower ip-bridge tcpdump-mini"
 ```
 
 Drop `relayd` from `PACKAGES` and remove any relayd hotplug script from the

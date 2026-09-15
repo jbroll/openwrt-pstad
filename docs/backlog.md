@@ -20,6 +20,23 @@ nothing: one ping lost at the move, none over the 5.5 minutes before it went,
 and none when its teardown deauthenticated the MAC. The router keeps a
 separate association per radio.
 
+## The window with two stations
+
+From the new station's association until the old repeater's teardown, the
+router holds two associations for the client's MAC and delivers to neither.
+That window is `PSTA_JOIN_DELAY` plus the wait for the old repeater's lock, and
+measured about 2 s in one roam. Tearing down as soon as the new station's
+4-way handshake completes, seen on the monitor as its EAPOL frames, would
+shorten it, but the capture filter would then have to pass data frames on a
+busy channel.
+
+## Unattributed roam loss
+
+Four roams between the repeaters lost 2.4 to 5.5 s of pings at 0.5 s
+intervals. The slowest had about 2.5 s after the new station's reconnect that
+no log line explains, and one ping lost 26 s after the roam. A captured roam
+covering both repeaters and the client would attribute it.
+
 ## Roams between repeaters cost a deauthentication
 
 When a client moves from one repeater to another, the old repeater's teardown

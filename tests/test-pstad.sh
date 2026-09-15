@@ -206,8 +206,8 @@ unset -f iw log kicked_client
 # air_join: received auth and association requests from a station to its AP
 bss=02:00:00:00:00:20
 rx="$ts.895099 2297348354us tsft 6.0 Mb/s 5260 MHz 11a -62dBm signal [bit 22]"
-check "air assoc"    "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (lucky7) [6.0 9.0 Mbit]" )"
-check "air reassoc"  "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac ReAssoc Request (lucky7) [6.0 9.0 Mbit]" )"
+check "air assoc"    "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (example-ssid) [6.0 9.0 Mbit]" )"
+check "air reassoc"  "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac ReAssoc Request (example-ssid) [6.0 9.0 Mbit]" )"
 check "air auth"     "$mac $bss" "$( air_join "$rx BSSID:$bss DA:$bss SA:$mac Authentication (Open System)-1: Successful" )"
 check "air auth reply from the AP" "" "$( air_join "$rx BSSID:$bss DA:$mac SA:$bss Authentication (Open System)-2: " )"
 check "air own transmission" "" "$( air_join "$ts.771967 [bit 15] BSSID:$bss DA:$bss SA:$mac Authentication (Open System)-1: Successful" )"
@@ -221,7 +221,7 @@ echo "$bss" > "$RUN/bssid"
 bridge() { echo "bridge $*"; }
 ubus() { echo "ubus $1 $2 $3" >> "$SYS/ubus"; }
 log() { :; }
-join="$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (lucky7) [6.0 Mbit]"
+join="$rx BSSID:$bss DA:$bss SA:$mac Assoc Request (example-ssid) [6.0 Mbit]"
 JOIN_DELAY=1
 defer() { echo "defer $*"; }
 mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"
