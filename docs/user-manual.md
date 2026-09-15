@@ -10,14 +10,27 @@ the others are for the shell.
 The event loop. Writes the shared supplicant config (retrying every 5 s until
 the backhaul is associated), then reads `bridge fdb show br br-lan` once to
 pick up clients already present, and after that reads `bridge monitor fdb`
-and `iw event` through a FIFO at `$RUN/fifo`. Every learned fdb entry for an
+and `iw event -t` through a FIFO at `$RUN/fifo`. Every learned fdb entry for an
 allowlisted MAC triggers a setup; an entry showing a known client on a
 different port tears the old station down and rebuilds it on the new port.
 Entries marked `Deleted`, `permanent` or `self` are ignored, as is a MAC on
-hold-off. From `iw event`, a `del station` on a proxied client's port, or a
-`disconnected (by AP)` on a proxy station, tears the client down, deletes its
-fdb entry and holds the MAC off for `PSTA_HOLDOFF` seconds; a `new station`
-clears the hold-off. Exits on TERM or INT after killing both children.
+hold-off.
+
+From `iw event`:
+
+- a `del station` for a proxied client on its port is checked with
+  `iw dev <port> station get <mac>` once a second for up to `PSTA_LEAVE_WAIT`
+  seconds. A client back on the AP in that time has re-associated and keeps its
+  station. Otherwise it is torn down, its fdb entry deleted and the MAC held off
+  for `PSTA_HOLDOFF` seconds.
+- a `del station` on a `psta-*` station means the upstream AP dropped it. The
+  client is torn down and its fdb entry deleted, with no hold-off, so a client
+  still sending on this repeater is rebuilt by its next frame. An event stamped
+  no later than the second the station's setup began is ignored, since it
+  belongs to the teardown of an earlier station with the same name.
+- a `new station` clears the hold-off.
+
+Exits on TERM or INT after killing both children.
 
 ### `pstad sweep`
 
@@ -70,7 +83,7 @@ command line for a manual run.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `count`, `seen` and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
+| `RUN` | `/var/run/psta` | State directory: one subdirectory per client MAC holding `iface`, `port`, `pref`, `count`, `seen`, `since` (when setup began) and, while a station reads not connected, `down`; plus `bssid`, `wpa.conf`, `fifo`, `lock`, `forwarder` (the MAC carrying the group-frame rule) and `holdoff/<mac>` stamps |
 | `ALLOW` | `/etc/psta/allow` | Allowlist path |
 | `PSTA_BRIDGE` | `br-lan` | The LAN bridge whose ports carry clients; group frames are redirected into it |
 | `PSTA_IDLE` | `300` | Seconds without the redirect counter rising before a client is torn down |
@@ -78,6 +91,7 @@ command line for a manual run.
 | `PSTA_ASSOC` | `20` | Seconds to wait for a new station to associate before giving up and tearing it down |
 | `PSTA_DOWN_GRACE` | `120` | Seconds a station may read not connected before it is torn down |
 | `PSTA_HOLDOFF` | `60` | Seconds a client torn down for leaving is ignored if re-learned from stale frames; cleared early when the AP reports it back |
+| `PSTA_LEAVE_WAIT` | `3` | Seconds a client the AP reported gone may take to reappear on the AP before it is torn down; covers a re-association, which deletes and re-adds the station. The monitor handles no other event meanwhile |
 
 ## The allowlist
 
@@ -166,7 +180,7 @@ Messages:
 | `<iface> did not associate in <n>s` | The client's station never connected; setup rolled back |
 | `setup failed for <mac> on <port>` | Some step of setup failed; see the preceding line |
 | `<iface> lost association` | The station read not connected for the whole grace period |
-| `<mac> left <port>` | The repeater's AP reported the client gone; torn down and held off |
-| `<iface> disconnected by the AP` | The upstream AP dropped the proxy station; torn down and held off |
+| `<mac> left <port>` | The repeater's AP reported the client gone and it did not reappear within `PSTA_LEAVE_WAIT`; torn down and held off |
+| `<iface> dropped by the AP` | The upstream AP deleted the proxy station; torn down with no hold-off |
 | `<iface> forwards group frames` | That station now carries the single group-frame rule |
 | `backhaul now on <bssid>, dropping every station` | The backhaul moved; all stations rebuilt against the new BSSID |

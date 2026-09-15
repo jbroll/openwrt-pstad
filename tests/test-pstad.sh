@@ -17,11 +17,15 @@ check "fdb permanent"      ""              "$(fdb_learned "02:00:00:00:00:11 dev
 check "fdb self"           ""              "$(fdb_learned "$mac dev lan1 self")"
 fdb_learned "Deleted $mac dev lan1 master br-lan"; check "fdb deleted status" 1 $?
 
+ts=1789483310
 check "iw new station"  "arrive phy0-ap0 $mac" "$(iw_event "phy0-ap0 (phy #0): new station $mac")"
 check "iw del station"  "leave phy0-ap0 $mac"  "$(iw_event "phy0-ap0 (phy #0): del station $mac")"
 check "iw no phy tag"   "leave phy0-ap0 $mac"  "$(iw_event "phy0-ap0: del station $mac")"
-check "iw kicked"       "kicked psta-00beef"   "$(iw_event "psta-00beef (phy #1): disconnected (by AP) reason: 2: Previous authentication no longer valid")"
-check "iw local disc"   ""                     "$(iw_event "psta-00beef (phy #1): disconnected (local request)")"
+check "iw timestamped"  "leave phy0-ap0 $mac"  "$(iw_event "$ts.097179: phy0-ap0: del station $mac")"
+check "iw kicked"       "kicked psta-00beef $ts" "$(iw_event "$ts.419077: psta-00beef: del station 02:00:00:00:00:20")"
+check "iw kicked no ts" "kicked psta-00beef 0" "$(iw_event "psta-00beef: del station 02:00:00:00:00:20")"
+( iw_event "$ts.699808: psta-00beef: new station 02:00:00:00:00:20" ); check "iw proxy station joins AP" 1 $?
+check "iw tiny unknown" ""                     "$(iw_event "$ts.421966: psta-00beef (phy #1): unknown event 48")"
 check "iw other event"  ""                     "$(iw_event "phy1-sta0 (phy #1): scan finished: 5180 5200")"
 iw_event "phy1-sta0 (phy #1): connected to 02:00:00:00:00:20"; check "iw other status" 1 $?
 
@@ -81,6 +85,25 @@ printf 'wpa_supplicant\0-i\0phy1-sta0\0' > "$PROC/127/cmdline"
 check "psta supplicants" "123 psta-00beef" "$(psta_supplicants)"
 rm -rf "${PROC:?}"/*
 
+# write_conf pins stations to the backhaul's channel for both selection and scan
+RUN=$(mktemp -d); CONF=$RUN/wpa.conf
+backhaul() { echo phy1-sta0; }
+iw() { printf 'Connected to 02:00:00:00:00:20 (on phy1-sta0)\n\tfreq: 5260.0\n'; }
+uci() {
+	case "$*" in
+	"show wireless") echo "wireless.sta.mode='sta'" ;;
+	"get wireless.sta.ssid") echo example-ssid ;;
+	"get wireless.sta.key") echo secret ;;
+	*) echo psk2 ;;
+	esac
+}
+write_conf
+check "write_conf bssid"     1 "$(grep -cx 'bssid=02:00:00:00:00:20' "$CONF")"
+check "write_conf freq_list" 1 "$(grep -cx 'freq_list=5260' "$CONF")"
+check "write_conf scan_freq" 1 "$(grep -cx 'scan_freq=5260' "$CONF")"
+rm -rf "$RUN"
+unset -f backhaul iw uci
+
 # Lifecycle logic with the device-touching functions replaced.
 RUN=$(mktemp -d); ALLOW=$RUN/allow; CONF=$RUN/wpa.conf; printf '%s\n' "$mac" > "$ALLOW"
 setup()    { echo "setup $*"; }
@@ -97,33 +120,63 @@ holdoff "$mac"
 check "handle held client"  ""                 "$(handle "$mac dev lan1 master br-lan")"
 rm -rf "$RUN/holdoff"
 
-# handle_event: leave tears down, deletes the fdb entry and holds the MAC off
+# handle_event: leave tears down, deletes the fdb entry and holds the MAC off,
+# once the station has stayed off the AP for LEAVE_WAIT
 mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
 bridge() { echo "bridge $*"; }
-check "event leave"  "teardown $mac
-bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "phy0-ap0 (phy #0): del station $mac")"
+iw() { return 254; }
+sleep() { echo "sleep $*"; }
+LEAVE_WAIT=3
+check "event leave"  "sleep 1
+sleep 1
+sleep 1
+teardown $mac
+bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "$ts.097179: phy0-ap0: del station $mac")"
 held "$mac"; check "event leave holds off" 0 $?
+rm -rf "$RUN/holdoff"
 mkdir -p "$RUN/$mac"; echo lan1 > "$RUN/$mac/port"
 check "event leave other port" "" "$(handle_event "phy0-ap0 (phy #0): del station $mac")"
 check "event leave unknown"    "" "$(handle_event "phy0-ap0 (phy #0): del station $mac2")"
+holdoff "$mac"
 check "event arrive clears"    "" "$(handle_event "phy0-ap0 (phy #0): new station $mac")"
 held "$mac"; check "event arrive cleared holdoff" 1 $?
 rm -rf "$RUN/$mac"
 
-# handle_event: a station the AP disconnected is torn down by its iface name
+# handle_event: a reassociation deletes and re-adds the AP's station, and the
+# client keeps its upstream station
 mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
+iw() { [ "$*" = "dev phy0-ap0 station get $mac" ]; }
+sleep() { echo "sleep $*"; }
+check "event reassociation keeps the client" "" "$(handle_event "$ts.097179: phy0-ap0: del station $mac")"
+[ -d "$RUN/$mac" ]; check "event reassociation keeps the client dir" 0 $?
+held "$mac"; check "event reassociation holds nothing off" 1 $?
+: > "$RUN/gone"
+iw() { [ ! -f "$RUN/gone" ]; }
+sleep() { rm -f "$RUN/gone"; }
+check "event leave keeps a client back within the wait" "" "$(handle_event "$ts.097179: phy0-ap0: del station $mac")"
+[ -d "$RUN/$mac" ]; check "event leave wait keeps the client dir" 0 $?
+rm -rf "$RUN/$mac"
+unset -f iw sleep
+
+# handle_event: a proxy station whose AP deleted it is torn down by its iface
+# name, with no hold-off, unless the event predates the station's setup
+mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
+echo $(( ts - 5 )) > "$RUN/$mac/since"
 check "event kicked" "teardown $mac
-bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "psta-00beef (phy #1): disconnected (by AP) reason: 2")"
-held "$mac"; check "event kicked holds off" 0 $?
-check "event kicked unknown iface" "" "$(handle_event "psta-00cafe (phy #1): disconnected (by AP) reason: 2")"
+bridge fdb del $mac dev phy0-ap0 master" "$(handle_event "$ts.419077: psta-00beef: del station 02:00:00:00:00:20")"
+held "$mac"; check "event kicked holds nothing off" 1 $?
+check "event kicked unknown iface" "" "$(handle_event "$ts.419077: psta-00cafe: del station 02:00:00:00:00:20")"
+mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
+echo "$ts" > "$RUN/$mac/since"
+check "event kicked from before setup" "" "$(handle_event "$ts.419077: psta-00beef: del station 02:00:00:00:00:20")"
+[ -d "$RUN/$mac" ]; check "event kicked from before setup keeps the client" 0 $?
 rm -rf "$RUN/$mac" "$RUN/holdoff"
 
 # dispatch routes iw lines to handle_event and fdb lines to handle
 handle()       { echo "handle $1"; }
 handle_event() { echo "event $1"; }
 check "dispatch fdb"  "handle $mac dev lan1 master br-lan" "$(dispatch "$mac dev lan1 master br-lan")"
-check "dispatch iw"   "event phy0-ap0 (phy #0): del station $mac" "$(dispatch "phy0-ap0 (phy #0): del station $mac")"
-check "dispatch disc" "event psta-00beef (phy #1): disconnected (by AP)" "$(dispatch "psta-00beef (phy #1): disconnected (by AP)")"
+check "dispatch iw"   "event $ts.097179: phy0-ap0: del station $mac" "$(dispatch "$ts.097179: phy0-ap0: del station $mac")"
 PSTAD_LIB=1 . ./pstad
 setup()    { echo "setup $*"; }
 teardown() { echo "teardown $1"; rm -rf "$RUN/$1"; }

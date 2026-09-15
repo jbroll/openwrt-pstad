@@ -141,11 +141,21 @@ network={
 	ssid="<ssid>"
 	bssid=<backhaul bssid>
 	freq_list=<backhaul freq>
+	scan_freq=<backhaul freq>
 	key_mgmt=SAE WPA-PSK
 	ieee80211w=1
 	psk="<key>"
 }
 ```
+
+`freq_list` only limits which BSS the supplicant may choose. The scan before
+the first association is limited by `scan_freq`, and without it each new
+station scanned the whole band. Measured on a WR1800K with the backhaul on
+5260 MHz, a radar-detection channel: that scan never reported results,
+`wpa_supplicant` aborted it after 10 s and then associated in under 0.1 s from
+the BSS entry the backhaul had already put in the phy's table. Every client
+waited those 10 s for a path upstream each time it joined. With `scan_freq` the
+scan finished in 0.16 s and the station was connected 0.24 s after it started.
 
 The two auth lines follow the backhaul's `encryption`: `sae` gives
 `key_mgmt=SAE` with `ieee80211w=2`, any `psk*` value gives `WPA-PSK` with
@@ -209,14 +219,40 @@ forwarder and nothing needs one.
 A client that roams from the repeater to the upstream access point, or goes to
 sleep, would otherwise leave its station associated under the client's MAC for
 the whole idle window, against the client's real association elsewhere. The
-monitor therefore also reads `iw event`, which reports every station the
-repeater's own access point adds or removes:
+monitor therefore also reads `iw event -t`, which reports every station the
+repeater's own access point adds or removes, and every proxy station's loss
+of its upstream access point:
 
 | event | action |
 |---|---|
-| `<port>: del station <mac>` for a proxied client on that port | tear the client down, delete its fdb entry on that port, and hold the MAC off |
-| `<station>: disconnected (by AP)` for a proxy station | the same, looked up by interface name |
+| `<port>: del station <mac>` for a proxied client on that port | unless the client is back on the AP within `PSTA_LEAVE_WAIT`, tear it down, delete its fdb entry on that port, and hold the MAC off |
+| `psta-xxxxxx: del station <bssid>` | tear that client down and delete its fdb entry, with no hold-off, unless stamped no later than the second its setup began |
 | `<port>: new station <mac>` | clear any hold-off on the MAC |
+
+A client re-associating to the same access point is not leaving, but hostapd
+deletes its station and adds it back, and `iw event` reports both. Measured
+with a test client re-associating on a WR1800K: `del station` and
+`new station` arrived 2 ms apart. Treated as a departure, each one cost the
+client its upstream station, and a phone did this three times in five minutes.
+So a `del station` is confirmed with `iw dev <port> station get <mac>`, polled
+once a second for up to `PSTA_LEAVE_WAIT` seconds (3 by default). The monitor
+handles no other line during that wait, which only a real departure pays.
+
+OpenWrt's `iw` is the tiny build, which prints scan, authentication,
+deauthentication and disconnect events as `unknown event <n>`, so the
+`disconnected (by AP)` line full `iw` prints never appears. The kernel reports
+the access point's own station on a managed interface with the same
+`new station` and `del station` events, and that `del station` is what marks a
+proxy station dropped. A teardown causes one too, but pstad reads it only after
+the lock is released, when a setup may already have rebuilt a station under
+the same name. Each client directory records the second its setup began in
+`since`, and an event stamped no later than that is ignored.
+
+A dropped proxy station gets no hold-off. If the client is still associated
+here and sending, its next frame is learned by the bridge and the station is
+rebuilt. If it has moved to another access point, nothing arrives and the
+station stays down, which ends the collision instead of leaving the
+supplicant to associate again and push the client's real association aside.
 
 The fdb deletion matters because the sweep re-reads `bridge fdb show` and
 would otherwise re-proxy the client from its stale entry. The hold-off,
@@ -230,12 +266,13 @@ client was proxied again 17 s later after it reassociated.
 `iw event` writes each line as it happens even when its output is a pipe, so
 the monitor reads it through the same FIFO as `bridge monitor fdb`.
 
-Whether the upstream access point ever sends the `disconnected (by AP)` event
-depends on the router. A Verizon Fios unit keeps both associations when the
-same MAC associates twice and delivers to the newer one, so a client roaming
-from the repeater to the router simply wins, and the repeater's own `del
-station` event is what tears its station down. See
-[backlog.md](backlog.md).
+Whether the upstream access point ever drops a proxy station depends on the
+router. A Verizon Fios unit usually keeps both associations when the same MAC
+associates twice and delivers to the newer one, so a client roaming from the
+repeater to the router simply wins, and the repeater's own `del station` for
+the client is what tears its station down. The same router has also
+deauthenticated a phone's proxy stations with reason 7, for sending data while
+it considered them unassociated. See [backlog.md](backlog.md).
 
 The `clsact` qdisc on the port and on the backhaul is added with errors
 ignored, since it may already exist from an earlier client; on the client's

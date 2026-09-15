@@ -34,7 +34,7 @@ that touches `pstad`.
 before the `case "$1"` dispatch, so `PSTAD_LIB=1 . ./pstad` loads every
 function into the calling shell without running anything. The test script does
 that, then redefines whichever functions or commands would touch the device
-(`iw`, `tc`, `ip`, `bridge`, `wpa_supplicant`, `kill`, `sleep`, `backhaul`,
+(`iw`, `tc`, `ip`, `bridge`, `uci`, `wpa_supplicant`, `kill`, `sleep`, `backhaul`,
 `backhaul_mac`, `phy_of`, `log`, `setup`, `teardown`, `write_conf`, `elect`,
 `handle`, `handle_event`, `psta_supplicants`) as shell functions that print
 their arguments or return canned output. Because the daemon calls these by bare

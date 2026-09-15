@@ -11,15 +11,21 @@ for overflow.
 
 ## The kicked path on hardware
 
-`disconnected (by AP)` on a proxy station is handled by the same code as a
-client leaving, and covered by the unit tests, but has not been provoked on a
-device. It needs an upstream access point that deauthenticates the old
-association when the same MAC associates again. A Verizon Fios router does
-not: tested by giving a client on the repeater the MAC of a host associated to
-the Fios directly, the router kept both associations and delivered the MAC's
-traffic to the newer one, and neither side received a deauthentication. On
-that router the repeater's own `del station` event is the only roam signal,
-and a MAC collision is silent.
+A `del station` on a `psta-*` station tears the client down, and that event
+has been seen on a device only for a local deauthentication. An upstream
+deauthentication was not provoked. Two stations with one fabricated MAC, on
+two repeaters, both stayed associated to a Verizon Fios router, including after
+the older one sent traffic. The same router did send
+`Reason: 7=CLASS3_FRAME_FROM_NONASSOC_STA` to a phone's proxy stations on both
+repeaters fifteen times in one night, while hostapd on both listed the phone,
+so a collision is not always silent. What sets it off is not known.
+
+## Orphan lines after an idle teardown
+
+A sweep that tears a client down for idling then runs `reap_orphans` at once,
+before the supplicant it signalled has exited, and logs `killed orphan
+wpa_supplicant` for it. `teardown-all` already waits for that; the sweep
+should wait for the supplicants it signalled in the same way.
 
 ## Wired clients that unplug
 

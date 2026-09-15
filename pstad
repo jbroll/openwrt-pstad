@@ -12,6 +12,7 @@ SWEEP=${PSTA_SWEEP:-60}
 ASSOC=${PSTA_ASSOC:-20}
 DOWN_GRACE=${PSTA_DOWN_GRACE:-120}
 HOLDOFF=${PSTA_HOLDOFF:-60}
+LEAVE_WAIT=${PSTA_LEAVE_WAIT:-3}
 PROC=${PROC:-/proc}
 KILL_WAIT=3
 
@@ -27,18 +28,27 @@ fdb_learned() {
 	printf '%s %s\n' "$1" "$3"
 }
 
-# One iw event line -> "arrive IFACE MAC", "leave IFACE MAC" or "kicked IFACE".
-# iw prints "IFACE (phy #N): new station MAC"; the MAC is the last word.
+# One iw event line -> "arrive IFACE MAC", "leave IFACE MAC" or "kicked IFACE
+# SECONDS". iw -t prints "SECONDS.MICROS: IFACE (phy #N): del station MAC"; the
+# MAC is the last word. iw-tiny prints a disconnect only as "unknown event 48",
+# so a proxy station losing its AP is read from the del station beside it.
 iw_event() {
 	case "$1" in
 	*": new station "*) ev=arrive ;;
 	*": del station "*) ev=leave ;;
-	*": disconnected (by AP)"*) ev=kicked ;;
 	*) return 1 ;;
 	esac
 	set -- $1
+	ts=0
+	case "$1" in [0-9]*.[0-9]*:) ts=${1%%.*}; shift ;; esac
 	iface=${1%:}
-	if [ "$ev" = kicked ]; then printf 'kicked %s\n' "$iface"; return 0; fi
+	case "$iface" in
+	psta-*)
+		[ "$ev" = leave ] || return 1
+		printf 'kicked %s %s\n' "$iface" "$ts"
+		return 0
+		;;
+	esac
 	for mac; do :; done
 	printf '%s %s %s\n' "$ev" "$iface" "$mac"
 }
@@ -83,6 +93,18 @@ held() {
 	[ $(( $(date +%s) - $(cat "$RUN/holdoff/$1") )) -lt "$HOLDOFF" ] && return 0
 	rm -f "$RUN/holdoff/$1"
 	return 1
+}
+
+# A reassociation deletes the AP's station and adds it back milliseconds later,
+# which must not cost the client its upstream station.
+returned() {  # PORT MAC
+	waited=0
+	until iw dev "$1" station get "$2" >/dev/null 2>&1; do
+		[ "$waited" -ge "$LEAVE_WAIT" ] && return 1
+		sleep 1
+		waited=$(( waited + 1 ))
+	done
+	return 0
 }
 
 sta_connected() { iw dev "$1" link 2>/dev/null | grep -q '^Connected to'; }
@@ -182,13 +204,15 @@ write_conf() {
 	auth=$(key_mgmt "$(uci -q get "wireless.$sec.encryption")")
 	mkdir -p "$RUN"
 	# Subshell umask keeps the PSK out of the conf file's initial permissions,
-	# instead of a window between create and chmod.
+	# instead of a window between create and chmod. freq_list only filters the
+	# BSS choice; without scan_freq each station scans the band and times out.
 	( umask 077
 	cat > "$CONF" <<-EOF
 	network={
 		ssid="$ssid"
 		bssid=$1
 		freq_list=$2
+		scan_freq=$2
 		$auth
 		psk="$psk"
 	}
@@ -236,7 +260,7 @@ setup() {  # MAC PORT
 	iface=$(iface_for "$mac") pref=$(alloc_pref)
 	mkdir -p "$d"
 	echo "$iface" > "$d/iface"; echo "$port" > "$d/port"; echo "$pref" > "$d/pref"
-	echo 0 > "$d/count"; date +%s > "$d/seen"
+	echo 0 > "$d/count"; date +%s > "$d/seen"; date +%s > "$d/since"
 	clear_station "$iface" &&
 	# EAPOL must reach hostapd and the supplicant, never the redirect.
 	iw phy "$(phy_of "$(backhaul)")" interface add "$iface" type managed addr "$mac" &&
@@ -331,6 +355,7 @@ handle_event() {  # one iw event line
 	arrive) rm -f "$RUN/holdoff/$3" ;;
 	leave)
 		[ -s "$RUN/$3/port" ] && [ "$(cat "$RUN/$3/port")" = "$2" ] || return 0
+		returned "$2" "$3" && return 0
 		log "$3 left $2"
 		teardown "$3"
 		bridge fdb del "$3" dev "$2" master 2>/dev/null
@@ -338,18 +363,23 @@ handle_event() {  # one iw event line
 		;;
 	kicked)
 		mac=$(mac_of_iface "$2") || return 0
+		# A teardown's own del station is read after the lock is released, when
+		# setup may already have rebuilt a station under the same name.
+		since=$(cat "$RUN/$mac/since" 2>/dev/null)
+		[ "$3" -gt "${since:-0}" ] || return 0
 		read -r port < "$RUN/$mac/port"
-		log "$2 disconnected by the AP"
+		log "$2 dropped by the AP"
 		teardown "$mac"
+		# No hold-off: a client still here is rebuilt by its next frame, and one
+		# that has gone sends none.
 		bridge fdb del "$mac" dev "$port" master 2>/dev/null
-		holdoff "$mac"
 		;;
 	esac
 }
 
 dispatch() {
 	case "$1" in
-	*": new station "*|*": del station "*|*": disconnected "*) handle_event "$1" ;;
+	*": new station "*|*": del station "*) handle_event "$1" ;;
 	*) handle "$1" ;;
 	esac
 }
@@ -424,7 +454,7 @@ monitor)
 	rm -f "$RUN/fifo"; mkfifo "$RUN/fifo"
 	bridge monitor fdb > "$RUN/fifo" &
 	MON=$!
-	iw event > "$RUN/fifo" &
+	iw event -t > "$RUN/fifo" &
 	IWMON=$!
 	trap 'kill $MON $IWMON; exit' TERM INT
 	bridge fdb show br "$BRIDGE" | while read -r l; do locked handle "$l"; done
