@@ -260,29 +260,5 @@ Each client uses one of the phy's managed slots, one `wpa_supplicant` process,
 and its own association and 4-way handshake with the upstream access point. In
 return each host has its own MAC upstream: port forwards reach the right host,
 Wake-on-LAN and PXE work, IPv6 neighbour discovery works, and `.local` names
-resolve from anywhere on the LAN.
-
-## relayd
-
-relayd is what OpenWrt offers for a repeater whose uplink is a station. It
-keeps `br-lan` and the station unbridged, learns hosts on each side from ARP
-and DHCP, installs a host route for each, and answers ARP for it on the other
-side. DHCP is relayed so clients get upstream leases.
-
-IP connectivity works, but every frame leaving the station carries the
-station's MAC, so upstream every host behind the repeater has that one MAC:
-
-- A router that resolves port-forward targets through its client table can
-  deliver to the wrong host, since several addresses share one MAC.
-- Wake-on-LAN from upstream never reaches the host.
-- PXE, which identifies machines by MAC, fails.
-- IPv6 neighbour discovery ties addresses to the wrong link-layer address.
-- mDNS does not cross the boundary, so `.local` names resolve only for clients
-  of the repeater's own AP.
-
-relayd and `pstad` cannot run together. Measured on one host within a minute:
-relayd alone, 0% loss with the wrong MAC upstream; both, about 50% loss;
-`pstad` alone, 0% loss. relayd re-announces the host's ARP under the station's
-MAC, so the router learns two paths to the host and sends about half its
-frames down the one with no redirect into the host's station. Remove relayd,
-including any hotplug script that starts it, before enabling `pstad`.
+resolve from anywhere on the LAN. The README explains why relayd cannot do
+this and cannot run alongside `pstad`.
