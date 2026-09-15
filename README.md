@@ -40,7 +40,7 @@ adds them. relayd must not run alongside it.
 - [docs/user-manual.md](docs/user-manual.md): commands, environment knobs, the
   allowlist, baking into an ImageBuilder overlay.
 - [docs/architecture.md](docs/architecture.md): why a station cannot bridge,
-  the option space, the per-phy station limit, and how the rules work.
+  the processes and events, the rule set, and why relayd falls short.
 - [docs/development.md](docs/development.md): layout and tests.
 - [docs/backlog.md](docs/backlog.md): open work.
 

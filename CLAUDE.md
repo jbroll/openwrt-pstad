@@ -22,7 +22,7 @@ it. The design is in [docs/architecture.md](docs/architecture.md).
 | `tests/tc-stats.txt` | Fixture: `tc -s filter show` output for the counter parser |
 | `docs/quickstart.md` | Prerequisites, install, allowlist, verify |
 | `docs/user-manual.md` | Every command, env knob, allowlist format, ImageBuilder overlay |
-| `docs/architecture.md` | Why a station cannot bridge, the option space, the rule set |
+| `docs/architecture.md` | Why a station cannot bridge, processes and events, the rule set, relayd |
 | `docs/development.md` | Layout, running tests, the stubbing scheme, traps |
 | `docs/backlog.md` | Outstanding work |
 

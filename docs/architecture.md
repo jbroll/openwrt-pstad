@@ -1,140 +1,154 @@
 # Architecture
 
-## A station cannot bridge
+## The problem
 
-An ordinary 802.11 data frame carries three addresses, and what they mean
-depends on direction. A frame from a station to an access point sets To-DS and
-reads {BSSID, source, destination}; the source field is the transmitter. A
-frame from the access point to a station sets From-DS and reads {destination,
-BSSID, source}, and the source may be any host on the wired side.
+An 802.11 frame from a station to its access point has address fields for the
+BSSID, the source and the destination, and the source is the station itself.
+There is no field for "this frame came from a host behind me", so a repeater
+whose uplink is an ordinary station cannot bridge the hosts behind it. 4-address
+WDS adds that field, but most ISP routers refuse it.
 
-So the downstream direction can carry a foreign source address and the
-upstream direction cannot. A station has no field in which to say "this frame
-came from a host behind me". That asymmetry is why an access point bridges
-dozens of clients faithfully while a station cannot represent even one, and it
-is why 4-address WDS exists.
+`pstad` works around it. For each client behind the repeater it
+creates an extra managed interface on the backhaul radio, gives it the client's
+MAC, and associates it to the upstream access point. The access point sees one
+ordinary station per client and needs no cooperation. `tc` rules move each
+client's frames between its bridge port and its own station, so the kernel
+does the forwarding and `pstad` only creates and removes stations.
 
-## What relayd does and what it loses
+The limit is the phy's interface combination. MT7915 under `mt76` advertises
+`#{ managed } <= 19, #channels <= 1`. The backhaul takes one slot, leaving 18
+clients, and every station must use the backhaul's channel. Other drivers
+report their own limit in `iw phy`.
 
-relayd runs two interfaces with no bridge between them, typically `br-lan`
-and the station. It learns hosts on each side by watching ARP and DHCP,
-installs a host route for each address, and answers ARP for that host on the
-other interface. DHCP is special-cased so clients behind the repeater get
-leases from the upstream router, and `-B` forwards broadcasts.
+## Components
 
-IP traffic to and from hosts behind the repeater works. What does not survive
-is each host's layer-2 identity upstream: every frame leaving the station
-carries the station's own address, so from the upstream segment every host
-behind the repeater resolves to that one MAC.
+`pstad` is a single POSIX sh script. Its state is plain files under `$RUN`
+(`/var/run/psta`), and it depends only on `iw`, `ip`, `bridge`, `tc`,
+`wpa_supplicant`, `flock`, `uci`, `ubus` and optionally `tcpdump`. The tests
+source it with `PSTAD_LIB=1` and replace every device command with a shell
+function.
 
-Anything keyed on layer 2 breaks on that:
+`pstad.init` has procd run two instances of the script, both respawned:
 
-- A router that resolves a port-forward target through its own client table
-  can deliver to the wrong host, since several addresses map to one MAC and the
-  router picks one.
-- Wake-on-LAN from upstream never reaches the host's NIC.
-- PXE, which identifies the booting machine by MAC.
-- IPv6 neighbour discovery, which ties an address to the link-layer address
-  that answered.
-- mDNS names only resolve for clients of the repeater's own access point,
-  since relayd does not forward multicast across the boundary.
+- `pstad monitor` reacts to events as they happen.
+- `pstad sweep` wakes every `PSTA_SWEEP` seconds (60) to age clients out and
+  repair anything the events missed.
 
-## What stock firmware does
+When the service stops, `pstad teardown-all` removes every station, rule and
+supplicant.
 
-Consumer repeater firmware bridges transparently. MediaTek's SDK calls the
-feature "MAC Repeater"; Broadcom calls it "Proxy STA". For each downstream
-client the repeater learns, it registers that client's MAC upstream as its own
-station entry. The upstream access point sees ordinary stations associating
-and needs no WDS, no Multi-AP, and no cooperation of any kind. The limit is a
-client count in the low tens, set by the driver, not the protocol.
-
-That feature lives in the proprietary driver. Neither `mt76`, the mainline
-driver OpenWrt uses for MediaTek radios, nor `mac80211` ships anything that
-presents itself as proxy STA. Mainline `mac80211` has no proxy-STA and no
-proposal for one; the only "proxy" work in `cfg80211` is AP-side proxy ARP, a
-different problem. `ath9k`, `ath10k` and `ath11k` offer 4-address WDS only.
-No working `ebtables` or `nftables` MAC-translation scheme for a wifi station
-link exists in packaged form; the one precedent is an ARP-NAT client-bridge
-hack tied to the old proprietary Broadcom `wl` driver. relayd is what OpenWrt
-ships because open client-side drivers cannot bridge in client mode. But the
-radio and the driver hold the primitive, as measured below.
-
-## The option space
-
-For faithful bridging, upstream frames need somewhere to carry the real
-source, and the access point must be willing to emit frames addressed to a
-MAC it has never seen associate. Every mechanism satisfies both in one of a
-small number of ways, and the list is closed.
-
-Needing the access point's cooperation:
-
-- 4-address WDS. To-DS and From-DS both set, a fourth field holding the
-  original source. Most ISP routers refuse it; Verizon Fios units are one
-  example that does not bridge 4-address frames.
-- 802.11s mesh. Mesh frames carry up to six addresses.
-- EasyMesh, Multi-AP and vendor SON. Control planes over one of the above.
-  `wpa_supplicant` fails the association outright against a non-Multi-AP AP.
-
-Needing nothing from the access point:
-
-- Clone one MAC. The station associates as the single host behind it.
-  Faithful, for exactly one host. This is what consumer "client bridge" means.
-- Associate once per host. Proxy STA. The faithful multi-host answer, capped
-  by the driver's concurrent-station limit. This is what `pstad` does.
-- Tunnel layer 2 over the link. GRETAP, VXLAN, L2TPv3 or batman-adv over the
-  station's own IP. Fully faithful including multicast, but it needs a peer on
-  the wired segment to terminate the tunnel.
-- Translate. relayd, or layer-2 MAC translation with a mapping table. The only
-  option that scales to arbitrary hosts with no AP cooperation, no driver
-  support and no tunnel peer, and unfaithful by construction.
-
-## The driver holds 19 stations
-
-Measured on a Fenvi WR1800K (MT7915 behind `mt7915e`, OpenWrt 24.10.0, kernel
-6.6.73, mt76 dated 2025-01-14). Each phy advertises the interface combination
+## Processes and events
 
 ```
-#{ IBSS } <= 1, #{ AP, mesh point } <= 16, #{ managed } <= 19,
-total <= 19, #channels <= 1
+procd
+ │
+ ├── pstad monitor
+ │     ├── bridge monitor fdb ──┐   MACs learned on bridge ports
+ │     ├── iw event -t ─────────┤   stations added or removed, on the
+ │     │                        │   repeater's AP or on a proxy station
+ │     ├── air watch ───────────┤   auth/assoc requests on the backhaul
+ │     │   (tcpdump, pstamon)   │   channel, from a monitor interface
+ │     │                        ▼
+ │     │                    $RUN/fifo
+ │     │                        │
+ │     └── read loop ◄──────────┘   one line at a time, under the lock
+ │           ├── fdb line ────────► handle        set up or move a client
+ │           ├── new/del station ─► handle_event  arrive, leave, dropped by AP
+ │           └── mgmt frame ──────► handle_air    client joined upstream elsewhere
+ │                                    │
+ │                                    └── deferred subshell: sleep, then take
+ │                                        the lock and tear the client down
+ │
+ ├── pstad sweep
+ │     └── every PSTA_SWEEP s, under the lock: idle, association and
+ │         supplicant checks, forwarder election, fdb reconciliation
+ │
+ └── wpa_supplicant × N    one per proxy station, daemonised, found later
+                           by command line
+
+         $RUN/lock  (flock)  serialises monitor handlers, deferred
+                             teardowns and sweep passes
 ```
 
-and the managed count is real. A second station interface with a fabricated
-address takes that address and associates beside the live backhaul:
+The three event sources write into one FIFO, and a single loop reads it. Each
+source writes whole lines smaller than `PIPE_BUF`, so lines from different
+writers never interleave, and the loop needs no job control or `select`. The
+air watch is a loop around `tcpdump` that recreates the monitor interface if a
+wifi reload removes it. Without `tcpdump` installed the monitor logs that joins
+elsewhere go unseen and runs with the other two sources.
 
-```sh
-iw phy phy1 interface add sta1 type managed addr 02:11:22:33:44:55
-ip link set sta1 up
-wpa_supplicant -B -s -i sta1 -c /tmp/wpa-sta1.conf -D nl80211
-```
+At start the monitor waits until the backhaul is connected and the supplicant
+config can be written, starts the three writers, then replays
+`bridge fdb show` so clients already present are set up. Events that arrive
+during the replay wait in the FIFO.
 
-The supplicant config must be pinned to the backhaul's own BSSID and
-frequency: `#channels <= 1` means a second station landing on another radio
-of the same SSID would violate the combination. The new station then draws
-its own DHCP lease, and a host on the upstream access point resolves that
-lease to the fabricated MAC rather than to the repeater's station. That is the
-thing relayd cannot do, done with no cooperation from the access point.
+Every handler runs through `locked`, which holds `flock` on `$RUN/lock` for the
+call. The monitor, the sweep and deferred teardowns therefore never act on a
+client at the same time. Handlers do not lock themselves, so the tests call
+them directly.
 
-Creating interfaces is not checked against the combination; 20 were created
-without error. Associating is checked. 18 test stations plus the backhaul
-connected, and the next two failed at `ip link set up` with `SIOCSIFFLAGS:
-Resource busy`. The limit is exactly the advertised 19, so with one slot on
-the repeater's own backhaul the usable capacity is 18 proxied clients.
+### Events and what they do
 
-## How pstad works
+| source | event | action |
+|---|---|---|
+| bridge | allowlisted MAC learned on a port, not held off | set the client up, or move it if the port changed |
+| AP port | `new station <mac>` | clear any hold-off, and start setup at once instead of waiting for the bridge to learn the client |
+| AP port | `del station <mac>` for a proxied client | if the client is not back within `PSTA_LEAVE_WAIT` s (3), tear it down, delete its fdb entry and hold the MAC off for `PSTA_HOLDOFF` s (60) |
+| proxy station | `del station <bssid>` | the upstream AP dropped the station. If the client is still here, leave the supplicant to reconnect. Otherwise tear it down, with no hold-off |
+| air watch | auth or assoc request from a proxied wireless client to the backhaul's BSSID, received over the air | after `PSTA_JOIN_DELAY` s (1), tear the client down, remove it from this repeater's AP, and hold it off |
 
-`pstad` is the userspace that turns that primitive into a repeater. It
-manages lifecycle only; the forwarding path is a fixed set of `tc` flower
-rules and the kernel does the work.
+A reassociation to the same AP produces `del station` and `new station`
+milliseconds apart, which is why a leave is confirmed by polling
+`iw dev <port> station get` before acting.
 
-### Per-client station
+A client is "still here" if it is on a wired port, or its AP reports an
+inactive time under `PSTA_RECENT` s (10). A drop while the client is still here
+is what a roam between two repeaters looks like on the new repeater: the old
+repeater's teardown deauthenticates the MAC, and the router ends every
+association for that MAC, including the new one.
 
-For each allowlisted client the bridge learns, `setup` creates a managed
-interface on the backhaul phy named `psta-<last six hex digits of the MAC>`
-with the client's MAC as its address, brings it up, and starts one
-`wpa_supplicant -B -D nl80211` on it. Every station shares one config,
-`$RUN/wpa.conf`, written once from the backhaul's `wifi-iface` in UCI (SSID,
-key and encryption) and the backhaul's live `iw dev ... link` (BSSID and
-frequency):
+The air watch catches a client that moves to another repeater without telling
+this one's AP. Two associations for one MAC in one BSS receive nothing, so the
+old station must go. Only frames with a received signal count, so this
+repeater's own stations never match. Only the first `BSSID:`, `DA:` and `SA:`
+in a line are read, because the SSID printed after them is chosen by the
+sender. The delay lets the new station finish its 4-way handshake before this
+repeater's deauthentication lands, so the router's drop costs one quick
+reconnect instead of a 10 s handshake timeout. The watch hears only the
+backhaul's channel.
+
+Proxy station events are stamped with the time. Each client records in
+`$RUN/<mac>/since` the second its setup began, and events no later than that
+are ignored, since they may come from a teardown of the station that was just
+replaced.
+
+OpenWrt ships the tiny `iw`, which prints disconnects as `unknown event <n>`.
+The `del station` for the AP's BSSID on a managed interface is the signal that
+remains.
+
+## Per-client state
+
+Each proxied client has a directory `$RUN/<mac>/`:
+
+| file | contents |
+|---|---|
+| `iface` | station name, `psta-` plus the last six hex digits of the MAC |
+| `port` | the bridge port the client is on |
+| `pref` | the client's `tc` filter priority |
+| `count`, `seen` | last redirect packet count, and when it last rose |
+| `since` | when setup began |
+| `down` | when the station was first seen not connected |
+| `leaving` | a join elsewhere has been heard and a teardown is pending |
+
+Shared files are `$RUN/wpa.conf`, `$RUN/bssid`, `$RUN/forwarder`,
+`$RUN/holdoff/<mac>` and `$RUN/lock`. `teardown` reads each file into a freshly
+unset variable, so a half-written directory can never direct a `tc filter del`
+at another client's port or pref.
+
+## Setup
+
+Every station shares one supplicant config, written from the backhaul's UCI
+section (SSID, key, encryption) and its live link (BSSID, frequency):
 
 ```
 network={
@@ -148,316 +162,127 @@ network={
 }
 ```
 
-`freq_list` only limits which BSS the supplicant may choose. The scan before
-the first association is limited by `scan_freq`, and without it each new
-station scanned the whole band. Measured on a WR1800K with the backhaul on
-5260 MHz, a radar-detection channel: that scan never reported results,
-`wpa_supplicant` aborted it after 10 s and then associated in under 0.1 s from
-the BSS entry the backhaul had already put in the phy's table. Every client
-waited those 10 s for a path upstream each time it joined. With `scan_freq` the
-scan finished in 0.16 s and the station was connected 0.24 s after it started.
+Pinning the BSSID and frequency keeps every station on the one allowed channel.
+`scan_freq` limits the first scan to that channel. Without it, a station scans
+the whole band, and on a DFS channel that scan times out after 10 s. The auth
+lines follow `encryption`: `sae` gives `SAE` with `ieee80211w=2`, `psk*` gives
+`WPA-PSK`, anything else gives both. The file is written under `umask 077`.
 
-The two auth lines follow the backhaul's `encryption`: `sae` gives
-`key_mgmt=SAE` with `ieee80211w=2`, any `psk*` value gives `WPA-PSK` with
-`ieee80211w=1`, and `sae-mixed` or an unset value gives `SAE WPA-PSK` with
-`ieee80211w=1`.
+`setup` then:
 
-Pinning to the BSSID and frequency is what keeps every station within the
-`#channels <= 1` combination. The file is written under `umask 077` in a
-subshell so the PSK is never world-readable, even briefly.
+1. Stops any supplicant still running for the station name.
+2. Adds the managed interface with the client's MAC, brings it up, and starts
+   `wpa_supplicant` on it.
+3. Installs the station-side rules.
+4. Waits up to `PSTA_ASSOC` s (20) for the station to report `Connected`.
+5. Runs the forwarder election.
+6. Installs the backhaul-side drop, then the port-side redirect last.
 
-### The rule set
+The port redirect waits for association because a client redirected into an
+unassociated station goes dark, while the rising redirect counter hides it from
+the idle check. If any step fails, the client is torn down and stays on the
+bridge as it was.
 
-Two `clsact` qdiscs and six flower filters carry a client. Prefs are
-evaluated in ascending order, so their numbering is the rule order. On the
-client's station interface, ingress (frames arriving from the air):
+## The rule set
 
-| pref | match | action | why |
-|---|---|---|---|
-| 1 | `protocol 0x888e` (EAPOL) | pass | The 4-way handshake and rekeys must reach the supplicant, never the redirect |
-| 2 | `dst_mac <client>` | mirred egress redirect to the port | Unicast for the client goes down to its bridge port |
-| 3 | `src_mac <backhaul station MAC>` | drop | The AP re-broadcasts the repeater's own upstream broadcasts to every station; sent back down they read as the repeater claiming a neighbour's address. Sits before pref 4 so those copies never reach the LAN |
-| 4 | `dst_mac 01:00:00:00:00:00/01:00:00:00:00:00` | mirred egress redirect to `br-lan` | Group and broadcast frames go down into the bridge, which floods them to every port. Present on one elected station only; see below |
+Each interface involved gets a `clsact` qdisc and flower filters on ingress.
+Lower prefs match first.
 
-On the backhaul station, ingress:
+On the client's station (frames from the air):
 
 | pref | match | action | why |
 |---|---|---|---|
-| `<client pref>` | `src_mac <client>` | drop | The AP echoes the client's own frames back to the backhaul. Anything listening behind tc ingress on the backhaul (relayd's sockets, the bridge) would otherwise see the client as an upstream host |
+| 1 | EAPOL (`0x888e`) | pass | the handshake must reach the supplicant |
+| 2 | `dst_mac <client>` | redirect to the client's port | unicast for the client |
+| 3 | `src_mac <backhaul MAC>` | drop | the AP repeats the repeater's own broadcasts to every station, and sent down they look like the repeater claiming a neighbour's address |
+| 4 | group bit set in `dst_mac` | redirect to `br-lan` | broadcast and multicast, flooded to every port. On the forwarder only |
 
-On the client's bridge port (`lan1`, `phy0-ap0`, ...), ingress:
+On the backhaul station:
 
 | pref | match | action | why |
 |---|---|---|---|
-| 1 | `protocol 0x888e` | pass | Shared by every client on the port. A client authenticating to the repeater's own AP must not have its EAPOL redirected |
-| `<client pref>` | `src_mac <client>` | mirred egress redirect to the client's station | Everything the client sends goes up its own station and out with its own MAC |
+| client's | `src_mac <client>` | drop | the AP echoes the client's own frames back, and the repeater would learn the client as an upstream host |
 
-A client's pref is the lowest integer from 100 not held by another client, read
-from the `pref` files under `$RUN` at setup and stored in the client's own, so
-prefs never collide with the fixed rules or with each other. Setup runs under
-the daemon's lock, so two clients cannot draw the same value.
+On the client's bridge port:
+
+| pref | match | action | why |
+|---|---|---|---|
+| 1 | EAPOL | pass | clients authenticating to the repeater's own AP |
+| client's | `src_mac <client>` | redirect to the client's station | everything the client sends leaves under its own MAC |
+
+A client's pref is the lowest integer from 100 not held by another client.
+Setup runs under the lock, so two clients never draw the same value.
 
 ### One forwarder for group frames
 
-The access point hands its copy of every downstream broadcast to each
-associated station, so with N proxy stations an unmodified rule set would
-inject each broadcast into the LAN N times. Measured on a bench with three
-proxied clients: a broadcast ping from the upstream side arrived three times at
-a client with a group rule on every station, and once with the rule on one.
+The AP gives every associated station its own copy of each broadcast, so a
+group rule on every station would put N copies into the LAN. Only one station,
+the forwarder named in `$RUN/forwarder`, carries pref 4. The election keeps the
+current forwarder while its station is connected, and otherwise moves the rule
+to the first connected station. It runs after each setup, when the forwarder is
+torn down, and at the end of each sweep.
 
-So only one station carries pref 4, and it redirects into the bridge rather
-than to its own client's port, so every port receives the frame. `elect`
-picks it: the current forwarder stays while its station reads connected;
-otherwise its rule is deleted, and the first client whose station is connected
-takes the rule and is recorded in `$RUN/forwarder`. `elect` runs at the end of
-every setup once the new station has associated, whenever the forwarder is
-torn down, and at the end of every sweep. With no client up there is no
-forwarder and nothing needs one.
+## The sweep
 
-### Clients that leave
+A redirected client's frames bypass the bridge, so its fdb entry ages out
+without an event. Each sweep:
 
-A client that roams from the repeater to the upstream access point, or goes to
-sleep, would otherwise leave its station associated under the client's MAC for
-the whole idle window, against the client's real association elsewhere. The
-monitor therefore also reads `iw event -t`, which reports every station the
-repeater's own access point adds or removes, and every proxy station's loss
-of its upstream access point:
+1. Compares the backhaul's BSSID with `$RUN/bssid`. If it changed, tears
+   everything down and rewrites the config, since every supplicant is pinned
+   to the old one.
+2. Tears down a client whose station has more than one supplicant.
+3. Tears down a client whose station has read not connected for
+   `PSTA_DOWN_GRACE` s (120). A supplicant reassociating reads not connected
+   briefly, hence the grace period.
+4. Reads the port redirect's packet counter from `tc -s filter show` and tears
+   down a client whose counter has not risen for `PSTA_IDLE` s (300).
+5. Kills supplicants on `psta-*` stations no client directory claims.
+6. Runs the forwarder election.
+7. Replays `bridge fdb show`, so a client torn down and back within the
+   bridge's ageing window is set up again.
 
-| event | action |
-|---|---|
-| `<port>: del station <mac>` for a proxied client on that port | unless the client is back on the AP within `PSTA_LEAVE_WAIT`, tear it down, delete its fdb entry on that port, and hold the MAC off |
-| `psta-xxxxxx: del station <bssid>` | leave the station to reconnect if its client is still here; otherwise tear the client down and delete its fdb entry, with no hold-off. Ignored if stamped no later than the second its setup began |
-| `<port>: new station <mac>` | clear any hold-off on the MAC |
+## Supplicants are found by command line
 
-A client re-associating to the same access point is not leaving, but hostapd
-deletes its station and adds it back, and `iw event` reports both. Measured
-with a test client re-associating on a WR1800K: `del station` and
-`new station` arrived 2 ms apart. Treated as a departure, each one cost the
-client its upstream station, and a phone did this three times in five minutes.
-So a `del station` is confirmed with `iw dev <port> station get <mac>`, polled
-once a second for up to `PSTA_LEAVE_WAIT` seconds (3 by default). The monitor
-handles no other line during that wait, which only a real departure pays.
+A `wpa_supplicant` survives the deletion of its interface and takes over a new
+interface created under the same name, where it fights the new supplicant and
+blocks association. Pid files cannot track them, because an exiting supplicant
+deletes its pid file even when a newer one has rewritten it. So supplicants get
+no pid file. `pstad` finds them by scanning `/proc/*/cmdline` for
+`wpa_supplicant ... -i psta-xxxxxx`, kills the ones for a station, and waits up
+to 3 s for them to exit before creating the interface again.
 
-OpenWrt's `iw` is the tiny build, which prints scan, authentication,
-deauthentication and disconnect events as `unknown event <n>`, so the
-`disconnected (by AP)` line full `iw` prints never appears. The kernel reports
-the access point's own station on a managed interface with the same
-`new station` and `del station` events, and that `del station` is what marks a
-proxy station dropped. A teardown causes one too, but pstad reads it only after
-the lock is released, when a setup may already have rebuilt a station under
-the same name. Each client directory records the second its setup began in
-`since`, and an event stamped no later than that is ignored.
-
-A drop is what a roam between two repeaters looks like on the new side.
-Observed on a Verizon Fios router with a test client moving from one WR1800K
-to the other: the new repeater's station associated at 14:57:45, the old
-repeater's leave wait ended and its teardown deauthenticated the client's MAC
-at 14:57:47, and at 14:57:49.5 the router deauthenticated the new station with
-`Reason: 7=CLASS3_FRAME_FROM_NONASSOC_STA`. The router keys associations by
-MAC, so the old station's deauthentication ended the new one's too. The new
-station's supplicant had associated again 0.35 s later, and tearing it down at
-that point stretched the gap to 2.5 s.
-
-So a dropped station is kept, and left to its supplicant, while its client is
-still here: on a wired port, or on an AP port whose `iw dev <port> station get`
-reports an `inactive time` under `PSTA_RECENT` seconds (10 by default). A
-station whose client has gone quiet is the stale side of a collision. It is
-torn down with no hold-off: nothing arrives from a client that has moved, so
-the station stays down instead of associating again and pushing the client's
-real association aside, and a client that comes back is rebuilt by its next
-frame.
-
-The fdb deletion matters because the sweep re-reads `bridge fdb show` and
-would otherwise re-proxy the client from its stale entry. The hold-off,
-`PSTA_HOLDOFF` seconds (60 by default), covers frames still in flight after
-the teardown. A client that comes back raises `new station` first, which clears
-the hold-off before its first frame is learned, so a real return is not
-delayed. On the bench a kicked client was torn down within a second of the
-event, the forwarder role moved to another client in the same second, and the
-client was proxied again 17 s later after it reassociated.
-
-`iw event` writes each line as it happens even when its output is a pipe, so
-the monitor reads it through the same FIFO as `bridge monitor fdb`.
-
-Whether the upstream access point ever drops a proxy station depends on the
-router. A Verizon Fios unit usually keeps both associations when the same MAC
-associates twice, and the repeater's own `del station` for the client is what
-tears the old station down. Until then delivery is unreliable: a client that
-roamed silently between two repeaters answered nothing for about 90 s, until
-the old station was removed. See [backlog.md](backlog.md). The same router has also
-deauthenticated a phone's proxy stations with reason 7, for sending data while
-it considered them unassociated. See [backlog.md](backlog.md).
-
-### Clients that join elsewhere
-
-A client can leave without its AP noticing. Moved from one repeater to another
-by BSSID, a test client sent the first repeater nothing, so hostapd there kept
-listing it and no `del station` came. Both proxy stations now held the client's
-MAC in the router's one 5 GHz BSS, and the router delivered to neither: the
-client answered no ping from 21 s after the move until the old repeater's
-hostapd dropped it for inactivity five minutes later. hostapd's old IAPP
-support, which had APs announce new stations to each other, was removed in
-hostapd 2.10.
-
-Every association that causes this happens on the backhaul's own channel,
-since it is a second association to the backhaul's BSS. So the monitor also
-runs `tcpdump` on a monitor interface, `pstamon`, added to the backhaul phy,
-filtered to authentication and association requests. The interface follows
-the phy's channel and needs no slot in its interface combination. A line from
-it names a client of this repeater when:
-
-- it carries a received signal. Frames this radio sent itself, including this
-  repeater's own proxy stations associating, appear with TX flags and no
-  signal;
-- its DA is its BSSID, so it is from a station to the AP, not the AP's reply;
-- its BSSID is the backhaul's;
-- its SA is a client proxied here on a wireless port.
-
-`PSTA_JOIN_DELAY` seconds later (1 by default), unless its station has been
-rebuilt since, such a client is torn down, its fdb entry deleted, it is removed
-from this repeater's AP with `ubus call hostapd.<port> del_client`, and its MAC
-is held off. The wait runs in the background and takes the lock itself.
-
-The wait is there because the teardown's deauthentication, sent under the
-client's MAC, makes the router drop that MAC's association, including the new
-one. Captured from a monitor during a roam, the new station authenticated at
-627.577, associated at 627.592 and finished its 4-way handshake by 627.628.
-The old repeater's deauthentication followed about 370 ms after the
-authentication, the router dropped the new station with reason 7, and it was
-associated again 0.45 s later. In an earlier roam the deauthentication evidently
-landed inside the handshake: the new station was never dropped, and it gave up
-after `wpa_supplicant`'s 10 s handshake timeout. A second is far past the 50 ms
-handshake, which leaves the single reason-7 reconnect. A `new station` for it clears the hold-off if it comes back. Only the
-first `BSSID:`, `DA:` and `SA:` in a line count, because the SSID printed after
-them is chosen by the sender.
-
-Measured on a WR1800K beside its live backhaul and eight proxy stations, a test
-station on the other repeater associating to the Fios appeared within
-milliseconds at -62 dBm, and `tcpdump` did not register in `top`.
-
-The first live roam with it, a test client moved silently from one repeater to
-the other, showed where the rest of the gap was. The old repeater dropped its
-station in the second the new repeater's station authenticated. But the new
-repeater began that station four seconds after the client associated, because
-setup waited for the bridge to learn the client and the client sent nothing
-while its traffic still went to the old repeater. A
-`new station` on a bridge port therefore starts setup directly. Joins on the
-router's other radios are not heard; see [backlog.md](backlog.md).
-
-The `clsact` qdisc on the port and on the backhaul is added with errors
-ignored, since it may already exist from an earlier client; on the client's
-own station it is always fresh.
-
-### Setup is gated on association
-
-Order matters. The port-side redirect is the last rule installed, and only
-after the station reports `Connected` in `iw dev <iface> link`, polled once a
-second for up to `PSTA_ASSOC` seconds (20 by default). If the redirect went
-in first, every frame the client sent would enter an unassociated interface
-and vanish, the client would be dark, and the redirect counter would keep
-rising, so the idle sweep would never rescue it. A station that fails to
-associate is logged and torn down, and the client is left on the bridge as it
-was.
-
-The backhaul-side drop for the client's own MAC goes in after association and
-before the port redirect, so the echo is hidden before the first upstream
-frame is sent.
-
-### Presence
-
-Once redirected, the client's frames no longer enter the bridge, so the
-bridge stops learning it and its fdb entry ages out with no event. The
-liveness signal is therefore the port-side redirect's own packet counter, read
-from `tc -s filter show` (the first `Sent ... pkt` line is the action's). The
-sweep records the counter in `$RUN/<mac>/count` and the time it last rose in
-`$RUN/<mac>/seen`; a counter unchanged for `PSTA_IDLE` seconds (300 by
-default) tears the client down.
-
-A station that dropped off the backhaul still attracts the client's frames
-through the redirect, so the counter cannot reveal it. The sweep also checks
-each station's association. A supplicant mid-reassociation reads
-`Not connected` for a moment, so the first such reading only stamps
-`$RUN/<mac>/down`; the client is torn down once that has persisted for
-`PSTA_DOWN_GRACE` seconds (120 by default), and a station seen connected again
-clears the stamp.
-
-Every sweep ends with a pass over `bridge fdb show`, so a client that was torn
-down and came straight back within the bridge's ageing window is re-proxied
-even though the bridge raised no new event.
-
-If the backhaul's BSSID has changed since the config was written, the sweep
-tears down every station and rewrites the config, because each supplicant is
-pinned to the old BSSID and frequency.
-
-### Two instances under one lock
-
-procd runs `pstad monitor` and `pstad sweep` as two instances so neither
-needs job control. The monitor blocks on a FIFO fed by `bridge monitor fdb`
-and `iw event`, reacting to clients arriving, moving ports or leaving; the
-sweep runs every `PSTA_SWEEP` seconds (60 by default). The monitor runs each
-line's handler, and the sweep each pass, through `locked`, which takes `flock`
-on `$RUN/lock` on fd 9 for the duration of the call, so a setup and a teardown
-for the same client never interleave.
-
-`wpa_supplicant -B` daemonises and would inherit fd 9 and hold the lock
-forever, so its command line closes the descriptor with `9>&-`. The tests
-cover exactly this.
-
-`teardown` reads each per-client file into a freshly unset variable, so a
-half-written client directory from an interrupted setup never causes a
-`tc filter del` against some other client's port or pref.
-
-### Supplicants are found by command line
-
-A `wpa_supplicant` keeps running when its interface is deleted, and takes over
-a new interface created under the same name. One that a teardown failed to kill
-therefore fights every later setup for that client: each new station times out
-waiting for association, and the client has no upstream path until the process
-is killed by hand.
-
-A pid file cannot track them. A supplicant deletes its pid file when it exits,
-so an old supplicant still shutting down while the next one for the same client
-starts deletes the new one's file, and the next teardown has nothing to kill.
-That was confirmed on a repeater with two supplicants given one `-P` path. So
-supplicants get no pid file. `setup` and `teardown` kill every supplicant whose
-command line in `/proc/<pid>/cmdline` names the station with `-i psta-xxxxxx`,
-and every sweep and `teardown-all` kill any supplicant on a `psta-*` station
-that no client directory claims.
-
-`kill` only sends the signal, and a supplicant still shutting down would take
-the interface `setup` creates next. So `setup` waits, checking once a second
-for up to 3 s, until no supplicant names the station. If one is still there,
-the setup fails and is torn down. `teardown-all` likewise waits up to 3 s for
-the supplicants its teardowns signalled before it looks for orphans, so only a
-supplicant that outlives that wait is logged as one. As a backstop, a sweep
-that finds more than one supplicant on a claimed station tears that client
-down, and the same sweep's fdb pass rebuilds it with one. The `flock` does not cover any of this.
-It serialises pstad's own actions, and these races are with processes that
-have already left pstad's control.
-
-## Why relayd cannot coexist
-
-Measured on one host behind a repeater, three ways within the same minute:
-relayd only, the wrong MAC upstream and 0% loss; relayd and proxy STA
-together, about 50% loss; proxy STA only with relayd stopped, 0% loss.
-
-relayd re-issues the host's ARP upstream under the station's own MAC, so the
-upstream router learns two paths to the host, and roughly half the frames take
-the relayd path, which has no redirect into the host's station. The proxy
-station has to be the only path. Remove relayd, including any hotplug script
-that launches it, before enabling `pstad`.
+`wpa_supplicant -B` would inherit the lock descriptor and hold the lock
+forever, so it is started with fd 9 closed.
 
 ## Costs
 
-Each proxied client takes one association slot on the backhaul phy. With the
-backhaul itself in one of the 19 managed slots, 18 clients is the ceiling on
-MT7915; other drivers advertise their own combination in `iw phy`.
+Each client uses one of the phy's managed slots, one `wpa_supplicant` process,
+and its own association and 4-way handshake with the upstream access point. In
+return each host has its own MAC upstream: port forwards reach the right host,
+Wake-on-LAN and PXE work, IPv6 neighbour discovery works, and `.local` names
+resolve from anywhere on the LAN.
 
-Each client also runs its own `wpa_supplicant` process on the repeater and
-does its own 4-way handshake with the upstream access point, so the access
-point sees N stations from one physical device.
+## relayd
 
-In return, every proxied host has its own MAC on the upstream segment:
-port-forward targets resolve to the right host, Wake-on-LAN and PXE work,
-IPv6 neighbour discovery works, and a host's `.local` name resolves from
-anywhere on the LAN, not only from clients of the repeater's own AP.
+relayd is what OpenWrt offers for a repeater whose uplink is a station. It
+keeps `br-lan` and the station unbridged, learns hosts on each side from ARP
+and DHCP, installs a host route for each, and answers ARP for it on the other
+side. DHCP is relayed so clients get upstream leases.
+
+IP connectivity works, but every frame leaving the station carries the
+station's MAC, so upstream every host behind the repeater has that one MAC:
+
+- A router that resolves port-forward targets through its client table can
+  deliver to the wrong host, since several addresses share one MAC.
+- Wake-on-LAN from upstream never reaches the host.
+- PXE, which identifies machines by MAC, fails.
+- IPv6 neighbour discovery ties addresses to the wrong link-layer address.
+- mDNS does not cross the boundary, so `.local` names resolve only for clients
+  of the repeater's own AP.
+
+relayd and `pstad` cannot run together. Measured on one host within a minute:
+relayd alone, 0% loss with the wrong MAC upstream; both, about 50% loss;
+`pstad` alone, 0% loss. relayd re-announces the host's ARP under the station's
+MAC, so the router learns two paths to the host and sends about half its
+frames down the one with no redirect into the host's station. Remove relayd,
+including any hotplug script that starts it, before enabling `pstad`.

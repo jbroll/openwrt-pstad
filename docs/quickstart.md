@@ -13,7 +13,7 @@ From a working relayd-style repeater to one client with its own MAC upstream.
 - A driver whose phy allows more than one managed interface at a time.
   `iw phy` lists this under "valid interface combinations"; mt76 on MT7915
   advertises `#{ managed } <= 19`. See
-  [architecture.md](architecture.md) for the measurement.
+  [architecture.md](architecture.md) for what that limit means.
 - Packages `tc-full kmod-sched-core kmod-sched-flower ip-bridge`, and
   `tcpdump-mini` for the monitor interface that hears clients roaming away.
   `install.sh` installs the first set if `tc-full` is missing and
