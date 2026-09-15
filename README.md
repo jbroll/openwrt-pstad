@@ -51,17 +51,14 @@ pstad status
 
 ## Install
 
-Install onto a repeater that already joins the upstream network as a plain
-station (a relayd-style configuration) over SSH:
+On a repeater already joined upstream as a plain station, from a checkout:
 
 ```sh
 sh install.sh repeater.local
 ```
 
-The `tc` flower redirect is the whole forwarding path, so the repeater needs
-`tc-full kmod-sched-core kmod-sched-flower ip-bridge`, and `tcpdump-mini` to
-hear clients joining the upstream network through another radio; `install.sh`
-adds them.
+It installs `tc-full kmod-sched-core kmod-sched-flower ip-bridge tcpdump-mini`
+if missing, then the daemon and its init script.
 
 ## Documentation
 
