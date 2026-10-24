@@ -99,6 +99,57 @@ held() {
 	return 1
 }
 
+# The backhaul station, its AP and the upstream gateway can be learned on a
+# bridge port only if that port leads back upstream: the bridge is not bridged
+# to the station. Every host learned there already has an uplink, and proxying
+# them fills the stations with clones, the upstream router's own MAC included.
+write_upstream() {
+	bh=$(backhaul) || return 0
+	{
+		backhaul_mac 2>/dev/null
+		cat "$RUN/bssid" 2>/dev/null
+		gw=$(ip -4 route show default dev "$bh" 2>/dev/null | sed -n 's/.* via \([0-9.]*\).*/\1/p' | head -1)
+		[ -n "$gw" ] && ip neigh show "$gw" dev "$bh" 2>/dev/null | sed -n 's/.* lladdr \([0-9a-f:]*\).*/\1/p'
+	} > "$RUN/upstream"
+}
+upstream_mac() { [ -s "$RUN/upstream" ] && grep -qix "$1" "$RUN/upstream"; }
+looped() { [ -f "$RUN/looped/$1" ]; }
+
+mark_loop() {  # PORT [MAC]
+	looped "$1" && return 0
+	mkdir -p "$RUN/looped"
+	: > "$RUN/looped/$1"
+	log "${2:-an upstream MAC} learned on $1, which leads upstream; not proxying from it"
+	for c in "$RUN"/*/; do
+		[ -s "$c/port" ] && [ "$(cat "$c/port")" = "$1" ] && teardown "$(basename "$c")"
+	done
+	return 0
+}
+
+# Ports with an upstream MAC learned on them, from bridge fdb show text.
+loop_ports() {  # FDB_TEXT
+	printf '%s\n' "$1" | while read -r l; do
+		e=$(fdb_learned "$l") || continue
+		set -- $e
+		upstream_mac "$1" && echo "$2"
+	done | sort -u
+}
+
+# Marks every port leading upstream and clears ports that no longer do. The
+# bridge flushes a port's entries when it loses carrier, so an unplugged loop
+# clears on the next sweep.
+check_loops() {  # FDB_TEXT
+	ports=$(loop_ports "$1")
+	for f in "$RUN"/looped/*; do
+		[ -f "$f" ] || continue
+		printf '%s\n' "$ports" | grep -qxF "${f##*/}" && continue
+		rm -f "$f"
+		log "${f##*/} no longer leads upstream"
+	done
+	for p in $ports; do mark_loop "$p"; done
+	return 0
+}
+
 # A reassociation deletes the AP's station and adds it back milliseconds later,
 # which must not cost the client its upstream station.
 returned() {  # PORT MAC
@@ -321,9 +372,10 @@ teardown_all() {
 	rm -f "$RUN/forwarder"
 	ports=$(for d in "$RUN"/*/; do [ -f "$d/port" ] && cat "$d/port"; done | sort -u)
 	for d in "$RUN"/*/; do
-		[ -d "$d" ] && [ "$(basename "$d")" != holdoff ] && teardown "$(basename "$d")"
+		case "$(basename "$d")" in holdoff|looped) continue ;; esac
+		[ -d "$d" ] && teardown "$(basename "$d")"
 	done
-	rm -rf "$RUN/holdoff"
+	rm -rf "$RUN/holdoff" "$RUN/looped"
 	# The teardowns above only signalled their supplicants; reaping at once
 	# would log each one as an orphan.
 	await_exit
@@ -340,6 +392,11 @@ teardown_all() {
 handle() {  # one bridge fdb line
 	line=$(fdb_learned "$1") || return 0
 	set -- $line
+	if upstream_mac "$1"; then
+		mark_loop "$2" "$1"
+		return 0
+	fi
+	looped "$2" && return 0
 	allowed "$1" || return 0
 	held "$1" && return 0
 	if [ -d "$RUN/$1" ]; then
@@ -520,7 +577,11 @@ sweep() {
 	done
 	reap_orphans
 	elect
-	bridge fdb show br "$BRIDGE" | while read -r l; do handle "$l"; done
+	# Loops first, so no client on a looped port is set up only to be torn down.
+	fdb=$(bridge fdb show br "$BRIDGE")
+	write_upstream
+	check_loops "$fdb"
+	printf '%s\n' "$fdb" | while read -r l; do handle "$l"; done
 }
 
 # A monitor interface on the backhaul phy hears every station joining the
@@ -558,7 +619,10 @@ monitor)
 		log "no tcpdump, clients joining the upstream BSS elsewhere go unseen"
 	fi
 	trap 'kill $MON $IWMON $AIR; iw dev "$MONIF" del 2>/dev/null; exit' TERM INT
-	bridge fdb show br "$BRIDGE" | while read -r l; do locked handle "$l"; done
+	fdb=$(bridge fdb show br "$BRIDGE")
+	write_upstream
+	locked check_loops "$fdb"
+	printf '%s\n' "$fdb" | while read -r l; do locked handle "$l"; done
 	while read -r l; do locked dispatch "$l"; done < "$RUN/fifo"
 	;;
 sweep) mkdir -p "$RUN"; while sleep "$SWEEP"; do locked sweep; done ;;

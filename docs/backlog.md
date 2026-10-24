@@ -54,17 +54,18 @@ before the supplicant it signalled has exited, and logs `killed orphan
 wpa_supplicant` for it. `teardown-all` already waits for that; the sweep
 should wait for the supplicants it signalled in the same way.
 
-## Upstream hosts proxied through a looped port
+## Hosts already upstream, one at a time
 
-A cable from a repeater's `lan1` into the upstream LAN makes every upstream
-host look like a wired client. Seen Oct 2026 on a proxy unit: pstad filled all
-18 stations with clones of the upstream router's own LAN MACs, the backhaul
-station's MAC, a Sonos and other upstream hosts, then logged `setup failed`
-every minute for the repeater's real Wi-Fi clients. Associating under those
-MACs also moved them to the radio in the router's table. Refuse to proxy the
-backhaul station's MAC, the BSSID's neighbours and the DHCP gateway's MAC, and
-when one of those appears on a bridge port, log the loop and stop proxying
-from that port.
+A port is marked as leading upstream only once the backhaul station, its BSSID
+or the gateway is learned on it (see
+[Ports that lead upstream](architecture.md#ports-that-lead-upstream)). Until
+then, and for a host that reaches upstream some other way, nothing stops a
+clone. A host already reachable upstream has its frames delivered to the
+backhaul station by the AP with its own MAC as the source, while a true client
+appears there only as its clone's echo. Recording source MACs seen on the
+backhaul's ingress before any clone exists, and refusing to proxy those, would
+catch each host individually. It needs a capture on the backhaul, which pstad
+does not run today.
 
 ## Wired clients that unplug
 

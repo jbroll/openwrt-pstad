@@ -36,6 +36,10 @@ Every `PSTA_SWEEP` seconds:
   from the client for `PSTA_IDLE` seconds;
 - kills `wpa_supplicant` processes on `psta-*` stations no client owns;
 - moves the group-frame rule to a connected station if needed;
+- marks each bridge port that has the backhaul station's MAC, its BSSID or the
+  gateway's MAC learned on it as leading upstream, tears down its clients and
+  proxies nothing more from it, and clears the mark once none is learned there.
+  See [Ports that lead upstream](architecture.md#ports-that-lead-upstream);
 - sets up any allowlisted client in the fdb that has no station.
 
 ### `pstad teardown-all`
@@ -152,3 +156,5 @@ Everything goes to syslog with tag `pstad`. Read it with `logread -e pstad`.
 | `no tcpdump, clients joining the upstream BSS elsewhere go unseen` | `tcpdump` is missing |
 | `<iface> forwards group frames` | That station now carries the group-frame rule |
 | `backhaul now on <bssid>, dropping every station` | The backhaul's BSSID changed; every station is rebuilt |
+| `<mac> learned on <port>, which leads upstream; not proxying from it` | The port is cabled back upstream; its clients are torn down. `an upstream MAC` stands in for the MAC when a sweep found it |
+| `<port> no longer leads upstream` | No upstream MAC is learned there any more, usually after an unplug |

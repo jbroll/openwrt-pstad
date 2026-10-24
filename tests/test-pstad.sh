@@ -120,6 +120,47 @@ holdoff "$mac"
 check "handle held client"  ""                 "$(handle "$mac dev lan1 master br-lan")"
 rm -rf "$RUN/holdoff"
 
+# write_upstream: the backhaul station, its BSSID and the gateway's MAC
+backhaul() { echo phy1-sta0; }
+backhaul_mac() { echo 02:00:00:00:00:10; }
+ip() {
+	case "$*" in
+	"-4 route show default dev phy1-sta0") echo "default via 192.168.1.1 dev phy1-sta0 proto static src 192.168.1.25" ;;
+	"neigh show 192.168.1.1 dev phy1-sta0") echo "192.168.1.1 lladdr 02:00:00:00:00:30 REACHABLE" ;;
+	esac
+}
+echo 02:00:00:00:00:20 > "$RUN/bssid"
+write_upstream
+check "write_upstream" "02:00:00:00:00:10
+02:00:00:00:00:20
+02:00:00:00:00:30" "$(cat "$RUN/upstream")"
+ip() { :; }
+write_upstream
+check "write_upstream with no gateway yet" "02:00:00:00:00:10
+02:00:00:00:00:20" "$(cat "$RUN/upstream")"
+unset -f backhaul backhaul_mac ip
+rm -f "$RUN/bssid"
+
+# An upstream MAC learned on a port marks it as leading upstream: its clients
+# are torn down and nothing more is proxied from it until it clears.
+gw=02:00:00:00:00:30
+echo "$gw" > "$RUN/upstream"
+log() { :; }
+mkdir -p "$RUN/$mac"; echo lan1 > "$RUN/$mac/port"
+check "handle upstream mac tears down the port's clients" "teardown $mac" "$(handle "$gw dev lan1 master br-lan")"
+looped lan1; check "handle upstream mac marks the port" 0 $?
+check "handle upstream mac never proxies it" "" "$(handle "$gw dev lan1 master br-lan")"
+check "handle client on a looped port" "" "$(handle "$mac dev lan1 master br-lan")"
+check "handle client on another port" "setup $mac phy0-ap0" "$(handle "$mac dev phy0-ap0 master br-lan")"
+check "loop ports" "lan1" "$(loop_ports "$gw dev lan1 master br-lan
+$mac dev phy0-ap0 master br-lan
+Deleted $gw dev lan2 master br-lan")"
+check_loops ""
+looped lan1; check "check_loops clears a port whose entries are gone" 1 $?
+check_loops "$gw dev lan3 master br-lan"
+looped lan3; check "check_loops marks a looped port" 0 $?
+rm -rf "$RUN/looped" "$RUN/upstream"
+
 # handle_event: leave tears down, deletes the fdb entry and holds the MAC off,
 # once the station has stayed off the AP for LEAVE_WAIT
 mkdir -p "$RUN/$mac"; echo phy0-ap0 > "$RUN/$mac/port"; echo psta-00beef > "$RUN/$mac/iface"
@@ -319,6 +360,7 @@ printf 'ifaceA\n' > "$RUN/mac1/iface"; printf 'lan1\n' > "$RUN/mac1/port"; print
 printf 'ifaceB\n' > "$RUN/mac2/iface"; printf 'phy0-ap0\n' > "$RUN/mac2/port"; printf '102\n' > "$RUN/mac2/pref"
 echo mac1 > "$RUN/forwarder"
 holdoff "$mac"
+mkdir -p "$RUN/looped"; : > "$RUN/looped/lan3"
 : > "$CONF"
 iw() { :; }
 tc() { echo "tc $*"; }
@@ -328,6 +370,9 @@ out=$(teardown_all)
 echo "$out" | grep -q "down holdoff"
 check "teardown_all skips the holdoff dir" 1 $?
 [ -d "$RUN/holdoff" ]; check "teardown_all clears holdoffs" 1 $?
+echo "$out" | grep -q "down looped"
+check "teardown_all skips the looped dir" 1 $?
+[ -d "$RUN/looped" ]; check "teardown_all clears loop marks" 1 $?
 unset -f log
 echo "$out" | grep -qxF 'tc qdisc del dev lan1 clsact'
 check "teardown_all clears lan1 clsact" 0 $?

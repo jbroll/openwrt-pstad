@@ -96,6 +96,7 @@ them directly.
 | AP port | `del station <mac>` for a proxied client | if the client is not back within `PSTA_LEAVE_WAIT` s (3), tear it down, delete its fdb entry and hold the MAC off for `PSTA_HOLDOFF` s (60) |
 | proxy station | `del station <bssid>` | the upstream AP dropped the station. If the client is still here, leave the supplicant to reconnect. Otherwise tear it down, with no hold-off |
 | air watch | auth or assoc request from a proxied wireless client to the backhaul's BSSID, received over the air | after `PSTA_JOIN_DELAY` s (1), tear the client down, remove it from this repeater's AP, and hold it off |
+| bridge | upstream MAC learned on a port | mark the port as leading upstream and tear down its clients. See [Ports that lead upstream](#ports-that-lead-upstream) |
 
 A reassociation to the same AP produces `del station` and `new station`
 milliseconds apart, which is why a leave is confirmed by polling
@@ -141,7 +142,7 @@ Each proxied client has a directory `$RUN/<mac>/`:
 | `leaving` | a join elsewhere has been heard and a teardown is pending |
 
 Shared files are `$RUN/wpa.conf`, `$RUN/bssid`, `$RUN/forwarder`,
-`$RUN/holdoff/<mac>` and `$RUN/lock`. `teardown` reads each file into a freshly
+`$RUN/holdoff/<mac>`, `$RUN/upstream`, `$RUN/looped/<port>` and `$RUN/lock`. `teardown` reads each file into a freshly
 unset variable, so a half-written directory can never direct a `tc filter del`
 at another client's port or pref.
 
@@ -238,8 +239,34 @@ without an event. Each sweep:
    down a client whose counter has not risen for `PSTA_IDLE` s (300).
 5. Kills supplicants on `psta-*` stations no client directory claims.
 6. Runs the forwarder election.
-7. Replays `bridge fdb show`, so a client torn down and back within the
-   bridge's ageing window is set up again.
+7. Reads `bridge fdb show` once, rewrites `$RUN/upstream`, and marks or clears
+   ports that lead upstream.
+8. Replays the same fdb text, so a client torn down and back within the
+   bridge's ageing window is set up again. Loops are marked first, so no
+   client on a looped port is set up only to be torn down.
+
+## Ports that lead upstream
+
+A bridge port cabled into the upstream LAN, directly or through a switch,
+makes every upstream host look like a client. On a repeater with a cable from
+`lan1` to the router's switch, `pstad` filled all 18 stations with clones of
+upstream hosts, the router's own LAN MAC and the backhaul station's MAC
+included, and the real Wi-Fi clients got `setup failed` every minute.
+
+The bridge is not bridged to the backhaul station, so three addresses can only
+be learned on a bridge port through such a loop: the backhaul station's MAC,
+its BSSID, and the gateway's MAC from the station's neighbour entry for its
+default route. `write_upstream` records them in `$RUN/upstream` when the
+monitor starts and on every sweep. When one is learned on a port, `pstad`
+marks the port in `$RUN/looped/`, tears down its clients, and proxies nothing
+more from it. Hosts behind that port already reach upstream over the wire. The
+kernel flushes a port's fdb entries when it loses carrier, so the sweep after
+an unplug finds no upstream MAC there and clears the mark.
+
+The mark also keeps the gateway's frames on that port in the bridge rather
+than up a clone's station, so a DHCP probe on the bridge sees the gateway's
+offer. The WR1800K's `backhaul-auto` relies on that to tell that a wire leads
+upstream.
 
 ## Supplicants are found by command line
 
