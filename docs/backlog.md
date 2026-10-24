@@ -54,6 +54,18 @@ before the supplicant it signalled has exited, and logs `killed orphan
 wpa_supplicant` for it. `teardown-all` already waits for that; the sweep
 should wait for the supplicants it signalled in the same way.
 
+## Upstream hosts proxied through a looped port
+
+A cable from a repeater's `lan1` into the upstream LAN makes every upstream
+host look like a wired client. Seen Oct 2026 on a proxy unit: pstad filled all
+18 stations with clones of the upstream router's own LAN MACs, the backhaul
+station's MAC, a Sonos and other upstream hosts, then logged `setup failed`
+every minute for the repeater's real Wi-Fi clients. Associating under those
+MACs also moved them to the radio in the router's table. Refuse to proxy the
+backhaul station's MAC, the BSSID's neighbours and the DHCP gateway's MAC, and
+when one of those appears on a bridge port, log the loop and stop proxying
+from that port.
+
 ## Wired clients that unplug
 
 No event marks a wired client leaving, so its station stays up for the idle
